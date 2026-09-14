@@ -36,7 +36,7 @@
 | 🎯 **一键认证** | `/lark setup` 扫码创建飞书应用（自动订阅消息事件 + 群聊全量 + 表情权限），**30 秒上线**，无需手搓开放平台；也支持 `DSH_LARK_APP_ID/SECRET` 手动通道 |
 | 🧠 **多模式 Agent** | 标准 / Code / 极简 / Cordis preset + 你在 GUI 自建的 preset，飞书发 `/mode` 出**单选卡片**即切（默认 Code：一次执行多步工具调用，更快更省） |
 | 🎛 **权限分级** | 只读 / 工作区写 / **Full access** 三种权限，`/permission` 卡片即切；默认 Full access 全放行 |
-| 🎨 **卡片化命令** | `/mode` `/permission` `/model` 全部是**单选按钮卡片**——点一下即切换，不用记命令拼写；模型选择按供应商分组展示 |
+| 🎨 **卡片化命令** | `/mode` `/permission` `/model` `/reasoning` 全部是**单选按钮卡片**——点一下即切换；思考档位从当前模型动态读取并按飞书会话持久化 |
 | 💬 **意图确认转发** | 模型提问（`ask_user_question`）→ **飞书意图确认卡片**（选项按钮 + 下拉多选 + 自定义输入），答完模型继续，飞书里完成完整交互闭环 |
 | 😊 **表情回执** | 收到消息随机表情"已收到"；回复完成 / 命令完成打 **DONE ✅**（只使用飞书实测有效 emoji） |
 | 💪 **出站零丢失** | 持久 Outbox（JSONL + at-least-once + 幂等键 + 分航道并行 + 失败离队不阻塞 + 周期清理），kill 重启自动续投；桥命令回复同样走 Outbox |
@@ -120,7 +120,7 @@ dsh web
 
 | 类别 | 命令 | 行为 |
 | ---- | ---- | ---- |
-| 选择类 | `/mode` `/permission` `/model` | **单选按钮卡片**，点选即切换（动态感知自建 preset 与提供商） |
+| 选择类 | `/mode` `/permission` `/model` `/reasoning` | **单选按钮卡片**，点选即切换（动态感知自建 preset、提供商与模型思考档位；`/thinking` 同义） |
 | 目标类 | `/goal [目标\|pause\|resume\|clear]` | 启动长任务自主执行 / 暂停 / 恢复 / 清除当前目标 |
 | 状态类 | `/status` `/sessions` `/help` | 全链路健康（含 Outbox/补发计数）/ 会话列表 / 帮助卡片 |
 | 会话类 | `/new` `/resume [序号\|id]` `/stop` `/workspace <路径>` | 新会话 / 极简恢复历史会话 / 停当前任务 / 切工作区 |
@@ -202,7 +202,7 @@ MIT — 自由使用、修改、分发。
 | 🎯 **One-click auth** | `/lark setup` scans a QR to create the Feishu app (auto-subscribes message events + group-all + reactions). 30-second onboarding; manual `DSH_LARK_APP_ID/SECRET` channel also supported |
 | 🧠 **Multi-mode Agent** | Standard / Code / Minimal / Cordis presets + your custom GUI presets; `/mode` shows a **single-select card** — tap to switch (default Code: multi-step tools in one shot) |
 | 🎛 **Permission tiers** | Read-only / workspace-write / **Full access**; `/permission` card switches instantly (Full access by default) |
-| 🎨 **Card-based commands** | `/mode` `/permission` `/model` are all **single-select button cards** — tap, no typing; models grouped by provider |
+| 🎨 **Card-based commands** | `/mode` `/permission` `/model` `/reasoning` are **single-select button cards**; reasoning levels are discovered from the current model and persisted per Lark conversation |
 | 💬 **Intent confirmation** | Model questions (`ask_user_question`) land as **Feishu intent-confirmation cards** (option buttons + multi-select dropdown + custom text); answer and the agent resumes |
 | 😊 **Reaction receipts** | Random "got it" reaction on inbound; **DONE ✅** on completion (only Feishu-validated emojis) |
 | 💪 **Outbound zero-loss** | Persistent Outbox (JSONL + at-least-once + idempotency + per-lane parallel + failure quarantine + periodic prune), resumes after kill/restart; bridge command replies ride the Outbox too |
@@ -254,7 +254,7 @@ Suspicious *Already up to date*? Run `dsh plugin --profile web outdated` first �
 
 ## ⌨️ Commands (Feishu side)
 
-- **Selectors** (single-select cards): `/mode` `/permission` `/model`
+- **Selectors** (single-select cards): `/mode` `/permission` `/model` `/reasoning` (`/thinking` alias)
 - **Goals**: `/goal [objective|pause|resume|clear]` (autonomous tasks / pause / resume / clear)
 - **Status**: `/status` `/sessions` `/help`
 - **Sessions**: `/new` `/resume [index|id]` `/stop` `/workspace <path>`

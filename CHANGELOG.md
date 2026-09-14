@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.4-webagent.1
+
+### Feature: per-conversation reasoning effort controls
+- Added `/reasoning` with `/thinking` as an alias. With no argument it renders a single-select Feishu card populated from the current DSH model's real reasoning metadata; `/reasoning <id>` selects an effort and `/reasoning default` returns to the model/provider default.
+- The selected `reasoningEffort` is stored per Feishu conversation, survives bridge restarts and session resume, and updates the live DSH model-selection reference without clearing context.
+- Switching models clears the previous model's explicit effort so model-owned effort ids cannot leak across incompatible routes.
+
 ## 0.5.2
 
 ### Fix: agent 完成但飞书无回复 — 事件丢失兜底、补发可救回、失败可见 (GH #9)

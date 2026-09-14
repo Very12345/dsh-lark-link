@@ -14,9 +14,10 @@ test("conversation-config: empty by default, set/get per key", () => {
   const f = tmpFile();
   const store = createConversationConfigStore(f);
   assert.deepEqual(store.get("dm:ou_a"), {});
-  store.set("dm:ou_a", { workspaceRoot: "/tmp/ws-a", provider: "p", model: "m" });
+  store.set("dm:ou_a", { workspaceRoot: "/tmp/ws-a", provider: "p", model: "m", reasoningEffort: "high" });
   assert.equal(store.get("dm:ou_a").workspaceRoot, "/tmp/ws-a");
   assert.equal(store.get("dm:ou_a").provider, "p");
+  assert.equal(store.get("dm:ou_a").reasoningEffort, "high");
   // Other keys untouched — no cross-talk.
   assert.deepEqual(store.get("group:oc_b"), {});
   rmSync(join(f, ".."), { recursive: true, force: true });
@@ -63,6 +64,16 @@ test("conversation-config: activeSessionId persists and can be cleared", () => {
 
   s2.set("dm:ou_s", { activeSessionId: undefined });
   assert.equal(s2.get("dm:ou_s").activeSessionId, undefined);
+  rmSync(join(f, ".."), { recursive: true, force: true });
+});
+
+test("conversation-config: reasoning effort persists and can return to model default", () => {
+  const f = tmpFile();
+  const store = createConversationConfigStore(f);
+  store.set("dm:ou_r", { provider: "webagent", model: "qwen.text.web.3.8-max", reasoningEffort: "medium" });
+  assert.equal(createConversationConfigStore(f).get("dm:ou_r").reasoningEffort, "medium");
+  store.set("dm:ou_r", { reasoningEffort: undefined });
+  assert.equal(store.get("dm:ou_r").reasoningEffort, undefined);
   rmSync(join(f, ".."), { recursive: true, force: true });
 });
 

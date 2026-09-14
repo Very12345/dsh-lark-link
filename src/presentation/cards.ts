@@ -299,6 +299,40 @@ export function modelCard(
 	};
 }
 
+/** Model-owned reasoning effort picker for one Feishu conversation. */
+export function reasoningCard(
+	model: { provider: string; model: string },
+	current: string | undefined,
+	defaultEffort: string | undefined,
+	efforts: ReadonlyArray<{ id: string; name: string; description?: string }>,
+): unknown {
+	const effective = current ?? defaultEffort;
+	const elements: unknown[] = [
+		{
+			tag: "markdown",
+			content: [
+				`**当前模型**: ${model.provider}/${model.model}`,
+				`**当前强度**: ${effective ?? "提供方默认"}${current ? "（本会话指定）" : "（跟随默认）"}`,
+				"",
+				"选择只影响当前飞书会话，下次模型请求生效，不会清空上下文。",
+			].join("\n"),
+		},
+		button("跟随模型默认", { op: "reasoning:default" }),
+	];
+	for (const effort of efforts) {
+		elements.push(button(
+			`${effort.name}${effort.id === effective ? "（当前）" : ""}`,
+			{ op: `reasoning:${effort.id}` },
+		));
+		if (effort.description) elements.push({ tag: "markdown", content: effort.description });
+	}
+	return {
+		schema: "2.0",
+		header: { title: { tag: "plain_text", content: "切换思考强度" }, template: "blue" },
+		body: { elements },
+	};
+}
+
 /** Single-select permission picker card. */
 export function permissionCard(current?: string): unknown {
 	return markdownCard(
@@ -421,6 +455,7 @@ export function helpCard(): unknown {
 			"- `/stop` 停止当前会话任务",
 			"- `/doctor` 生成诊断包（含 session log）",
 			"- `/model` 查看/切换模型",
+			"- `/reasoning` 查看/切换当前模型的思考强度（`/thinking` 同义）",
 			"- `/lark-config k=v` 热改配置（嵌套键如 `streaming.enabled=true`）",
 			"- `/lark setup|start|stop|status` 桥接管理",
 			"- `/goal` 等 DSH 命令原样执行",
@@ -474,7 +509,7 @@ export function commandPanelCard(): unknown {
 				{
 					tag: "markdown",
 					content:
-						"文本命令：`/status` `/mode` `/permission` `/workspace` `/stop` `/doctor` `/help`\n\n`/goal` 等 DSH 命令原样执行；skill 无需前缀，直接描述任务即可。",
+						"文本命令：`/status` `/mode` `/model` `/reasoning` `/permission` `/workspace` `/stop` `/doctor` `/help`\n\n`/goal` 等 DSH 命令原样执行；skill 无需前缀，直接描述任务即可。",
 				},
 			],
 		},

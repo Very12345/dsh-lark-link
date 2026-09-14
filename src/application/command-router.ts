@@ -49,6 +49,8 @@ const BRIDGE_COMMANDS = new Set([
 	"help",
 	"feishu-config",
 	"model",
+	"reasoning",
+	"thinking",
 	"mode",
 	"permission",
 	"new",

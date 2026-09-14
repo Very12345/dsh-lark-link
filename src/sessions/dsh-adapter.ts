@@ -16,6 +16,7 @@ import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { SessionEvent } from "@deepseek-ai/dsh-session";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import type { ReasoningEffortId } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import type {
 	SessionEventOut,
@@ -47,8 +48,8 @@ export interface DshAdapterDeps {
 	 * agent. Legacy shape {current} is still accepted (shared by all keys).
 	 */
 	modelSelection?:
-		| { current: { provider: string; model: string } }
-		| { currentFor: (key: string) => { provider: string; model: string } | undefined };
+		| { current: { provider: string; model: string; reasoningEffort?: ReasoningEffortId } }
+		| { currentFor: (key: string) => { provider: string; model: string; reasoningEffort?: ReasoningEffortId } | undefined };
 	/**
 	 * ask_user_question → Feishu bridge. When present, a shadow
 	 * `ask_user_question` tool is registered in each agent scope (overriding
@@ -96,6 +97,7 @@ interface AgentRegistrySurface {
 		agentOptions?: {
 			provider: string;
 			model: string;
+			reasoningEffort?: ReasoningEffortId;
 		};
 		setup?: (agentCtx: Context) => unknown;
 	}): Promise<AgentHandleSurface>;
@@ -105,6 +107,7 @@ interface AgentRegistrySurface {
 		agentOptions?: {
 			provider: string;
 			model: string;
+			reasoningEffort?: ReasoningEffortId;
 		};
 		setup?: (agentCtx: Context) => unknown;
 	}): Promise<AgentHandleSurface>;
@@ -259,7 +262,7 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 	// reference; mutating its fields switches the model on the next request).
 	const selFor = (
 		key: string,
-	): { provider: string; model: string } | undefined => {
+	): { provider: string; model: string; reasoningEffort?: ReasoningEffortId } | undefined => {
 		const ms = deps.modelSelection;
 		if (!ms) return undefined;
 		if ("currentFor" in ms) return ms.currentFor(key);
@@ -537,6 +540,9 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 			? {
 					provider: defaultModel.provider,
 					model: defaultModel.model,
+					...(defaultModel.reasoningEffort === undefined
+						? {}
+						: { reasoningEffort: defaultModel.reasoningEffort }),
 				}
 			: undefined;
 		if (!defaultModel) {

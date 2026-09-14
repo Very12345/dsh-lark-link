@@ -13,6 +13,7 @@ import {
 	errorCard,
 	button,
 	modeCard,
+	reasoningCard,
 	questionCard,
 	resumeCard,
 } from "../../../src/presentation/cards.ts";
@@ -143,6 +144,26 @@ test("modeCard 渲染动态名单（含自定义与不可用标注）", () => {
 	assert.ok(text.includes("AAA 模式（自定义） ← 当前"), "自定义模式应标注并高亮当前");
 	assert.ok(text.includes("（不可用：示例原因）"), "broken 模式应标注不可用原因");
 	assert.ok(!text.includes("standard（自定义）"), "官方模式不应标自定义");
+});
+
+test("reasoningCard dynamically renders model-owned efforts and default reset", () => {
+	const card = reasoningCard(
+		{ provider: "webagent", model: "qwen.text.web.3.8-max" },
+		"medium",
+		"low",
+		[
+			{ id: "low", name: "Low" },
+			{ id: "medium", name: "Medium" },
+			{ id: "high", name: "High" },
+		],
+	) as Json;
+	const ops = collectButtons(card).map(
+		(b) => (b.behaviors as Array<{ value: Json }>)[0]!.value.op,
+	);
+	assert.deepEqual(ops, ["reasoning:default", "reasoning:low", "reasoning:medium", "reasoning:high"]);
+	const text = JSON.stringify(card);
+	assert.match(text, /medium/);
+	assert.match(text, /本会话指定/);
 });
 
 test("questionCard 单选：每选项一个按钮，op 形如 uqa:<id>:<index>", () => {

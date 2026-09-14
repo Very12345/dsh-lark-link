@@ -6,7 +6,7 @@ import type { DshSessionBackend } from "../../../src/sessions/dsh-session-backen
 test("adapter: cwd/preset/modelSelection are resolved PER KEY (no cross-talk)", async () => {
 	const registry = fakeRegistry();
 	const ctx = ctxOf(registry, undefined);
-	const selA = { provider: "p1", model: "m1" };
+	const selA = { provider: "p1", model: "m1", reasoningEffort: "high" as never };
 	const selB = { provider: "p2", model: "m2" };
 	const backend = createDshAdapter({
 		ctx,
@@ -24,7 +24,7 @@ test("adapter: cwd/preset/modelSelection are resolved PER KEY (no cross-talk)", 
 	assert.equal(registry.created.length, 2);
 	const a = registry.created[0] as {
 		meta?: { cwd?: string; agentPreset?: string };
-		agentOptions?: { provider?: string; model?: string };
+		agentOptions?: { provider?: string; model?: string; reasoningEffort?: string };
 	};
 	const b = registry.created[1] as {
 		meta?: { cwd?: string; agentPreset?: string };
@@ -33,7 +33,7 @@ test("adapter: cwd/preset/modelSelection are resolved PER KEY (no cross-talk)", 
 	// key A: its own cwd, default preset, its own model
 	assert.equal(a.meta?.cwd, "/ws/a");
 	assert.equal(a.meta?.agentPreset, "code");
-	assert.deepEqual(a.agentOptions, { provider: "p1", model: "m1" });
+	assert.deepEqual(a.agentOptions, { provider: "p1", model: "m1", reasoningEffort: "high" });
 	// key B: default cwd, "ptc" alias preset, its own model — NOT A's values
 	assert.equal(b.meta?.cwd, "/ws/default");
 	assert.equal(b.meta?.agentPreset, "ptc");

@@ -53,9 +53,11 @@ test("router: plain text routes to agent", async () => {
 });
 
 test("router: bridge commands are consumed by the bridge", async () => {
-  const { router } = makeRouter();
-  assert.equal(await router.route(mkMsg("/status")), "bridge");
-  assert.equal(await router.route(mkMsg("/support")), "bridge");
+	const { router } = makeRouter({ bridgeHandler: async (name) => ["status", "support", "reasoning", "thinking"].includes(name) });
+	assert.equal(await router.route(mkMsg("/status")), "bridge");
+	assert.equal(await router.route(mkMsg("/support")), "bridge");
+	assert.equal(await router.route(mkMsg("/reasoning")), "bridge");
+	assert.equal(await router.route(mkMsg("/thinking high")), "bridge");
 });
 
 test("router: DSH-registered commands run natively and reply via outbox", async () => {

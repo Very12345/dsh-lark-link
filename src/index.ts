@@ -60,6 +60,7 @@ import {
 	looksLikeMarkdown,
 	modeCard,
 	modelCard,
+	reasoningCard,
 	permissionCard,
 	questionCard,
 	resumeCard,
@@ -102,6 +103,7 @@ import {
 } from "node:fs";
 import { zstdDecompressSync } from "node:zlib";
 import type { FeishuInboundMessage } from "./common/types.ts";
+import type { ReasoningEffortId } from "@deepseek-ai/dsh-llm";
 
 export const name = "dsh-lark-link";
 export const inject = [
@@ -180,7 +182,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	// first use and keep it (a GUI default switch only affects NEW
 	// conversations, never existing ones); entries with an override keep
 	// their own model.
-	const liveModelSelection = { provider: "", model: "" };
+	const liveModelSelection: { provider: string; model: string; reasoningEffort?: ReasoningEffortId } = { provider: "", model: "" };
 	const admService = (
 		ctx as unknown as {
 			get?(
@@ -188,7 +190,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			):
 				| {
 						currentSelection?():
-							| { provider?: string; model?: string }
+							| { provider?: string; model?: string; reasoningEffort?: ReasoningEffortId }
 							| undefined;
 						saveSelection?(s: {
 							provider: string;
@@ -203,21 +205,23 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		if (cur?.provider && cur.model) {
 			liveModelSelection.provider = cur.provider;
 			liveModelSelection.model = cur.model;
+			liveModelSelection.reasoningEffort = cur.reasoningEffort;
 		}
 	}
 	const liveModels = new Map<
 		string,
-		{ provider: string; model: string; override: boolean }
+		{ provider: string; model: string; reasoningEffort?: ReasoningEffortId; override: boolean }
 	>();
 	const liveModelFor = (
 		key: string,
-	): { provider: string; model: string; override: boolean } => {
+	): { provider: string; model: string; reasoningEffort?: ReasoningEffortId; override: boolean } => {
 		let m = liveModels.get(key);
 		if (!m) {
 			const o = convCfg.get(key);
 			m = {
 				provider: o.provider ?? liveModelSelection.provider,
 				model: o.model ?? liveModelSelection.model,
+				reasoningEffort: (o.reasoningEffort ?? liveModelSelection.reasoningEffort) as ReasoningEffortId | undefined,
 				override: Boolean(o.provider && o.model),
 			};
 			liveModels.set(key, m);
@@ -1430,16 +1434,68 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				// mutate the live entry — the agent's installed selection object
 				// IS this entry, so the next reply uses the new model without a
 				// rebuild. The bridge default (and other chats) are untouched.
-				convCfg.set(modelKey, { provider, model });
+				// Reasoning ids are model-owned. Reset the previous model's explicit
+				// effort so an incompatible value cannot poison the next request.
+				convCfg.set(modelKey, { provider, model, reasoningEffort: undefined });
 				const entry = liveModelFor(modelKey);
 				entry.provider = provider;
 				entry.model = model;
+				delete entry.reasoningEffort;
 				entry.override = true;
 				backend?.clearImageUnsupported?.(modelKey);
 				await durableReply(name, 
 					msg,
 					`模型已切换: ${provider}/${model}\n本会话下次回复生效（会话不中断，其他会话不受影响）。`,
 				);
+				return true;
+			}
+			case "reasoning":
+			case "thinking": {
+				const key = bridge.conversationKeyFor(msg);
+				const selected = liveModelFor(key);
+				if (!selected.provider || !selected.model) {
+					await durableReply(name, msg, "当前会话尚未选择模型，请先使用 /model。");
+					return true;
+				}
+				const llm = (ctx as unknown as { get?(name: string): unknown }).get?.("llm") as
+					| { resolveModelInfo?(provider: string, model: string): Promise<{ reasoning?: { efforts: ReadonlyArray<{ id: string; name: string; description?: string }>; defaultEffort?: string } }> }
+					| undefined;
+				let info: { reasoning?: { efforts: ReadonlyArray<{ id: string; name: string; description?: string }>; defaultEffort?: string } } | undefined;
+				try {
+					info = await llm?.resolveModelInfo?.(selected.provider, selected.model);
+				} catch (err) {
+					await durableReply(name, msg, `读取模型思考档位失败: ${err instanceof Error ? err.message : String(err)}`);
+					return true;
+				}
+				const reasoning = info?.reasoning;
+				if (!reasoning || reasoning.efforts.length === 0) {
+					await durableReply(name, msg, `当前模型 ${selected.provider}/${selected.model} 不提供可选思考强度。`);
+					return true;
+				}
+				const arg = _rawInput.trim().toLowerCase();
+				if (!arg) {
+					await sender.sendCard(msg.chatId, reasoningCard(
+						{ provider: selected.provider, model: selected.model },
+						selected.reasoningEffort,
+						reasoning.defaultEffort,
+						reasoning.efforts,
+					));
+					return true;
+				}
+				if (["default", "auto", "provider-default"].includes(arg)) {
+					convCfg.set(key, { reasoningEffort: undefined });
+					delete selected.reasoningEffort;
+					await durableReply(name, msg, `思考强度已恢复为模型默认${reasoning.defaultEffort ? `（${reasoning.defaultEffort}）` : ""}，本会话下次请求生效。`);
+					return true;
+				}
+				const effort = reasoning.efforts.find((item) => item.id.toLowerCase() === arg);
+				if (!effort) {
+					await durableReply(name, msg, `当前模型不支持思考强度 ${arg}（可用: default, ${reasoning.efforts.map((item) => item.id).join(", ")}）`);
+					return true;
+				}
+				convCfg.set(key, { reasoningEffort: effort.id });
+				selected.reasoningEffort = effort.id as ReasoningEffortId;
+				await durableReply(name, msg, `思考强度已切换为 ${effort.name}（${effort.id}），仅当前飞书会话生效，下次请求生效。`);
 				return true;
 			}
 			case "mode": {
@@ -1949,7 +2005,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	// override), and notify the affected Feishu chats which model is in effect.
 	let lastModelSig =
 		liveModelSelection.provider && liveModelSelection.model
-			? `${liveModelSelection.provider}/${liveModelSelection.model}`
+			? `${liveModelSelection.provider}/${liveModelSelection.model}/${liveModelSelection.reasoningEffort ?? "default"}`
 			: "";
 	let modelPollTimer: NodeJS.Timeout | undefined;
 	const startModelDefaultPoll = (): void => {
@@ -1958,11 +2014,12 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			try {
 				const cur = admService?.currentSelection?.();
 				if (!cur?.provider || !cur.model) return;
-				const sig = `${cur.provider}/${cur.model}`;
+				const sig = `${cur.provider}/${cur.model}/${cur.reasoningEffort ?? "default"}`;
 				if (sig === lastModelSig) return;
 				lastModelSig = sig;
 				liveModelSelection.provider = cur.provider;
 				liveModelSelection.model = cur.model;
+				liveModelSelection.reasoningEffort = cur.reasoningEffort;
 				logger.info(`bridge default model now ${sig} (GUI-side switch)`);
 			} catch {
 				// best-effort

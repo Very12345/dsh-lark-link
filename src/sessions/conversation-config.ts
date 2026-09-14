@@ -16,6 +16,8 @@ export interface ConversationOverrides {
 	provider?: string;
 	/** Model id for this conversation (undefined = bridge default). */
 	model?: string;
+	/** Model-specific reasoning effort (undefined = provider/model default). */
+	reasoningEffort?: string;
 	/** Agent preset id for this conversation (undefined = bridge default). */
 	preset?: string;
 	/** Active session id for this conversation (survives dsh restarts to continue conversation). */
@@ -60,6 +62,7 @@ export function createConversationConfigStore(
 		if (o.workspaceRoot) out.workspaceRoot = o.workspaceRoot;
 		if (o.provider) out.provider = o.provider;
 		if (o.model) out.model = o.model;
+		if (o.reasoningEffort) out.reasoningEffort = o.reasoningEffort;
 		if (o.preset) out.preset = o.preset;
 		if (o.activeSessionId) out.activeSessionId = o.activeSessionId;
 		return out;
