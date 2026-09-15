@@ -544,6 +544,44 @@ test("adapter: listPresets falls back to empty when agentPresets service is abse
 	assert.deepEqual(await withFailure.listPresets(), []);
 });
 
+test("adapter: code/ptc alias follows the live DSH preset roster", async () => {
+	const currentMounts: string[] = [];
+	const currentRegistry = fakeRegistry();
+	const current = createDshAdapter({
+		ctx: ctxOf(currentRegistry, undefined, {
+			async list() {
+				return [{ id: "standard" }, { id: "ptc" }, { id: "minimal" }];
+			},
+			async mount(_ctx: unknown, presetId: string) {
+				currentMounts.push(presetId);
+			},
+		}),
+		sessionPrefix: "lark-link",
+		logger: silentLogger,
+		preset: () => "code",
+	});
+	await current.ensureAgent("dm:current");
+	assert.deepEqual(currentMounts, ["ptc"]);
+
+	const legacyMounts: string[] = [];
+	const legacyRegistry = fakeRegistry();
+	const legacy = createDshAdapter({
+		ctx: ctxOf(legacyRegistry, undefined, {
+			async list() {
+				return [{ id: "standard" }, { id: "code" }, { id: "minimal" }];
+			},
+			async mount(_ctx: unknown, presetId: string) {
+				legacyMounts.push(presetId);
+			},
+		}),
+		sessionPrefix: "lark-link",
+		logger: silentLogger,
+		preset: () => "ptc",
+	});
+	await legacy.ensureAgent("dm:legacy");
+	assert.deepEqual(legacyMounts, ["code"]);
+});
+
 test("adapter: concurrent ensureAgent on the same key collapses into ONE agent (no already-exists race)", async () => {
 	const registry = fakeRegistry();
 	const ctx = ctxOf(registry, undefined);

@@ -383,6 +383,10 @@ export function createMessageHandler(deps: MessageHandlerDeps): MessageHandler {
 						senderOpenId: msg.senderOpenId,
 						text: (msg.text ?? msg.content ?? "").slice(0, 8_000),
 					});
+					deps.ctx.status.refreshCounters({
+						inboundPending: deps.wal.pendingReplays().length,
+						inboundFailed: deps.wal.failedCount(),
+					});
 				} catch (err) {
 					logger.warn(
 						`inbound-wal accept failed: ${
@@ -393,6 +397,7 @@ export function createMessageHandler(deps: MessageHandlerDeps): MessageHandler {
 			}
 			try {
 				await cm.handleMessage(msg, attachments);
+				deps.ctx.status.update({ sessions: cm.size() });
 			} catch (err) {
 				logger.error(`conversation handling failed: ${String(err)}`);
 				return "dropped";

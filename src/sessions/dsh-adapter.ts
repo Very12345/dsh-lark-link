@@ -578,15 +578,28 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 					get?(name: string):
 						| {
 								mount?(agentCtx: Context, presetId: string): Promise<unknown>;
+								list?(): Promise<Array<{ id: string }>>;
 						  }
 						| undefined;
 				}
 			).get?.("agentPresets");
 			if (presets?.mount) {
+				const requestedPreset =
+					presetOverrides.get(key) ?? deps.preset?.(key) ?? "ptc";
+				let actualPreset = requestedPreset === "code" ? "ptc" : requestedPreset;
+				try {
+					const ids = new Set((await presets.list?.())?.map((row) => row.id) ?? []);
+					if (ids.has(requestedPreset)) actualPreset = requestedPreset;
+					else if (requestedPreset === "ptc" && ids.has("code")) actualPreset = "code";
+					else if (requestedPreset === "code" && ids.has("ptc")) actualPreset = "ptc";
+				} catch {
+					// Current DSH names the code-oriented preset `ptc`; retain the
+					// compatibility fallback if the live roster cannot be read.
+				}
 				await presets.mount(
-				agentCtx,
-				presetOverrides.get(key) ?? deps.preset?.(key) ?? "ptc",
-			);
+					agentCtx,
+					actualPreset,
+				);
 			}
 			// Shadow ask_user_question: forward DSH intent-confirmation
 			// questions to Feishu cards instead of the GUI-only provider.

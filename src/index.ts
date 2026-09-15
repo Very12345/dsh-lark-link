@@ -365,7 +365,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			preset: (key: string) => {
 				const p =
 					convCfg.get(key).preset ?? (getCfg().agentPreset || "code");
-				return p === "ptc" ? "code" : p; // 别名兼容
+				return p;
 			},
 			modelSelection: {
 				currentFor: (key: string) => {
@@ -994,7 +994,13 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		onDelivered: (sessionKey) => {
 			try {
 				const route = routeStore.get(sessionKey);
-				if (route?.lastMessageId) inboundWal.delivered(route.lastMessageId);
+				if (route?.lastMessageId) {
+					inboundWal.delivered(route.lastMessageId);
+					status.refreshCounters({
+						inboundPending: inboundWal.pendingReplays().length,
+						inboundFailed: inboundWal.failedCount(),
+					});
+				}
 			} catch {
 				// swallow — WAL failures never break delivery
 			}
@@ -3281,13 +3287,14 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		});
 		const sweep = setInterval(() => {
 			const n = conversations.sweep();
-			if (n > 0)
-				status.refreshCounters({
-					outboxPending: outbox.pendingCount(),
-					outboxFailed: outbox.failedCount(),
-					inboundPending: inboundWal.pendingReplays().length,
-					inboundFailed: inboundWal.failedCount(),
-				});
+			status.update({
+				sessions: conversations.size(),
+				outboxPending: outbox.pendingCount(),
+				outboxFailed: outbox.failedCount(),
+				inboundPending: inboundWal.pendingReplays().length,
+				inboundFailed: inboundWal.failedCount(),
+			});
+			if (n > 0) logger.info(`conversation sweep disposed ${n} idle session(s)`);
 		}, 60_000);
 		sweep.unref?.();
 		return async () => {

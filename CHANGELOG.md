@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.4-webagent.9
+
+### Fix: live management counters follow real bridge state
+- Refresh inbound WAL counters immediately on acceptance and durable delivery, and refresh the active-session count after agent creation and periodic sweeping. The management panel no longer reports a stale pending request or zero sessions after a successful reply.
+
+## 0.5.4-webagent.8
+
+### Fix: inbound counted but no DSH conversation was created
+- Fixed the `code`/`ptc` compatibility alias being applied in the wrong direction. Current DSH exposes `ptc`; the bridge previously sent `code`, so inbound usage and WAL were recorded before `agent-presets: preset "code" not found` aborted agent creation.
+- Preset resolution now reads the live DSH roster and maps in either direction only when necessary, with `code → ptc` as the current-version fallback.
+
 ## 0.5.4-webagent.7
 
 ### Feature: app-scoped model access and workspace management
