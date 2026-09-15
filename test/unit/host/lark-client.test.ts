@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import {
 	isValidRef,
+	normalizeManualCredentials,
 	parseCredentials,
 	resolveCredentials,
 	persistCredentials,
@@ -97,6 +98,37 @@ function fakeSdk() {
 }
 
 // ---- credential ref validation ----
+test("lark-client: manual credentials normalize without exposing extra fields", () => {
+	assert.deepEqual(
+		normalizeManualCredentials({
+			appId: "  cli_example_1234  ",
+			appSecret: "  secret-value-1234  ",
+			domain: "lark",
+			ignored: "value",
+		}),
+		{
+			appId: "cli_example_1234",
+			appSecret: "secret-value-1234",
+			domain: "lark",
+		},
+	);
+});
+
+test("lark-client: manual credentials reject malformed ids and secrets", () => {
+	assert.throws(
+		() => normalizeManualCredentials({ appId: "bad", appSecret: "secret-123" }),
+		/App ID/,
+	);
+	assert.throws(
+		() =>
+			normalizeManualCredentials({
+				appId: "cli_example_1234",
+				appSecret: "has whitespace",
+			}),
+		/App Secret/,
+	);
+});
+
 test("lark-client: ref pattern rejects dots (ctx.credentials requirement)", () => {
 	assert.equal(isValidRef("LARK_LINK_APP"), true);
 	assert.equal(isValidRef("lark-link.app"), false, "dots are invalid");

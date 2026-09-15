@@ -43,7 +43,14 @@ const reactDom = require("react-dom") as {
 
 const win = globalThis as unknown as {
 	location?: { origin?: string };
-	fetch?: (url: string) => Promise<{ ok: boolean; json(): Promise<unknown> }>;
+	fetch?: (
+		url: string,
+		init?: {
+			method?: string;
+			headers?: Record<string, string>;
+			body?: string;
+		},
+	) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 	// Browser-only, used as the portal mount target. Kept out of the TS dom lib
 	// (this package's lib is ES2023); accessed lazily through globalThis.
 	document?: { body?: unknown } | null;
@@ -73,6 +80,8 @@ export interface ClientContext extends Context {
 interface StatusPayload {
 	connState?: string;
 	configured?: boolean;
+	appIdMasked?: string;
+	domain?: "feishu" | "lark";
 	outboxPending?: number;
 	outboxFailed?: number;
 	inboundFailed?: number;
@@ -150,6 +159,12 @@ export function apply(ctx: ClientContext): void {
 		const [st, setSt] = useState<StatusPayload | undefined>(undefined);
 		const [qrTs, setQrTs] = useState<number>(0);
 		const [qrLoaded, setQrLoaded] = useState<boolean>(false);
+		const [manualOpen, setManualOpen] = useState<boolean>(false);
+		const [appId, setAppId] = useState<string>("");
+		const [appSecret, setAppSecret] = useState<string>("");
+		const [domain, setDomain] = useState<"feishu" | "lark">("feishu");
+		const [manualSaving, setManualSaving] = useState<boolean>(false);
+		const [manualError, setManualError] = useState<string>("");
 
 		useEffect(() => {
 			if (!open) return;
@@ -175,6 +190,51 @@ export function apply(ctx: ClientContext): void {
 		const state = deriveState(st);
 		const origin = win.location?.origin ?? "";
 		const showQr = state === "setup";
+		const valueOf = (event: unknown): string =>
+			String(
+				(event as { target?: { value?: unknown } })?.target?.value ?? "",
+			);
+		const saveManualCredentials = (): void => {
+			if (manualSaving) return;
+			if (!appId.trim() || !appSecret.trim()) {
+				setManualError("请填写 App ID 和 App Secret");
+				return;
+			}
+			setManualSaving(true);
+			setManualError("");
+			void win
+				.fetch?.(`${origin}/plugins/lark-link/credentials`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ appId: appId.trim(), appSecret, domain }),
+				})
+				.then(async (response) => {
+					const value = (await response.json()) as {
+						ok?: boolean;
+						error?: string;
+						appIdMasked?: string;
+						domain?: "feishu" | "lark";
+						connState?: string;
+					};
+					if (!response.ok || !value.ok)
+						throw new Error(value.error || `保存失败（HTTP ${response.status}）`);
+					setAppSecret("");
+					setManualOpen(false);
+					setSt((previous) => ({
+						...previous,
+						configured: true,
+						appIdMasked: value.appIdMasked,
+						domain: value.domain,
+						connState: value.connState ?? "connected",
+					}));
+				})
+				.catch((error: unknown) =>
+					setManualError(
+						error instanceof Error ? error.message : "手动配置失败",
+					),
+				)
+				.finally(() => setManualSaving(false));
+		};
 
 		const button = h(
 			"button",
@@ -268,6 +328,126 @@ export function apply(ctx: ClientContext): void {
 				)
 			: null;
 
+		const credentialSummary = st?.appIdMasked
+			? h(
+					"div",
+					{
+						style: {
+							marginBottom: "10px",
+							opacity: 0.75,
+							fontSize: "11px",
+						},
+					},
+					`当前：${st.appIdMasked} · ${st.domain === "lark" ? "Lark" : "飞书"}`,
+				)
+			: null;
+		const fieldStyle = {
+			boxSizing: "border-box",
+			width: "100%",
+			padding: "7px 8px",
+			border: "1px solid rgba(255,255,255,.18)",
+			borderRadius: "7px",
+			background: "rgba(255,255,255,.06)",
+			color: "inherit",
+			font: "inherit",
+		};
+		const manualToggle = h(
+			"button",
+			{
+				type: "button",
+				onClick: () => {
+					setManualOpen((value) => !value);
+					setManualError("");
+				},
+				style: {
+					width: "100%",
+					padding: "7px 9px",
+					marginBottom: "10px",
+					border: "1px solid rgba(127,209,255,.4)",
+					borderRadius: "7px",
+					background: "rgba(127,209,255,.1)",
+					color: "#b9e6ff",
+					cursor: "pointer",
+					font: "inherit",
+				},
+			},
+			manualOpen ? "取消手动配置" : "手动配置 App ID / App Secret",
+		);
+		const manualForm = manualOpen
+			? h(
+					"div",
+					{
+						style: {
+							display: "grid",
+							gap: "8px",
+							padding: "10px",
+							marginBottom: "10px",
+							border: "1px solid rgba(255,255,255,.12)",
+							borderRadius: "8px",
+							background: "rgba(0,0,0,.18)",
+						},
+					},
+					h("label", null, "App ID"),
+					h("input", {
+						type: "text",
+						value: appId,
+						autoComplete: "off",
+						spellCheck: false,
+						placeholder: "cli_xxxxxxxxxxxxxxxx",
+						onChange: (event: unknown) => setAppId(valueOf(event)),
+						style: fieldStyle,
+					}),
+					h("label", null, "App Secret"),
+					h("input", {
+						type: "password",
+						value: appSecret,
+						autoComplete: "new-password",
+						spellCheck: false,
+						placeholder: "不会回显或写入普通配置",
+						onChange: (event: unknown) => setAppSecret(valueOf(event)),
+						style: fieldStyle,
+					}),
+					h("label", null, "服务区域"),
+					h(
+						"select",
+						{
+							value: domain,
+							onChange: (event: unknown) =>
+								setDomain(valueOf(event) === "lark" ? "lark" : "feishu"),
+							style: fieldStyle,
+						},
+						h("option", { value: "feishu" }, "飞书（中国大陆）"),
+						h("option", { value: "lark" }, "Lark（国际版）"),
+					),
+					manualError
+						? h(
+								"div",
+								{ style: { color: "#ff8a80", whiteSpace: "pre-wrap" } },
+								manualError,
+							)
+						: null,
+					h(
+						"button",
+						{
+							type: "button",
+							disabled: manualSaving,
+							onClick: saveManualCredentials,
+							style: {
+								padding: "8px 10px",
+								border: "none",
+								borderRadius: "7px",
+								background: "#3370ff",
+								color: "white",
+								cursor: manualSaving ? "default" : "pointer",
+								opacity: manualSaving ? 0.65 : 1,
+								font: "inherit",
+							},
+						},
+						manualSaving ? "保存并重连中…" : "保存并重连",
+					),
+				)
+			: null;
+
 		// QR only while unconfigured; hidden (but fetched) until it loads.
 		const qrImg = showQr
 			? h("img", {
@@ -311,7 +491,7 @@ export function apply(ctx: ClientContext): void {
 					lineHeight: 1.6,
 				},
 			},
-			"重新配置：/lark uninstall-clean → /lark setup",
+			"可在本面板手动更新凭据，或使用 /lark setup 扫码配置",
 			h("br"),
 			"详情与全链路：/lark status",
 		);
@@ -352,7 +532,12 @@ export function apply(ctx: ClientContext): void {
 					"button",
 					{
 						type: "button",
-						onClick: () => setOpen(false),
+						onClick: () => {
+							setOpen(false);
+							setManualOpen(false);
+							setAppSecret("");
+							setManualError("");
+						},
 						style: {
 							background: "transparent",
 							border: "none",
@@ -368,6 +553,9 @@ export function apply(ctx: ClientContext): void {
 			),
 			banner,
 			hint,
+			credentialSummary,
+			manualToggle,
+			manualForm,
 			qrImg,
 			qrHint,
 			footer,

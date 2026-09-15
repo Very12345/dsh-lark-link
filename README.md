@@ -33,7 +33,7 @@
 
 | 能力 | 说明 |
 | ---- | ---- |
-| 🎯 **一键认证** | `/lark setup` 扫码创建飞书应用（自动订阅消息事件 + 群聊全量 + 表情权限），**30 秒上线**，无需手搓开放平台；也支持 `DSH_LARK_APP_ID/SECRET` 手动通道 |
+| 🎯 **一键认证** | `/lark setup` 扫码创建飞书应用（自动订阅消息事件 + 群聊全量 + 表情权限），**30 秒上线**；也可在 Web UI 的 Lark 面板手动填写 App ID / App Secret 并保存重连 |
 | 🧠 **多模式 Agent** | 标准 / Code / 极简 / Cordis preset + 你在 GUI 自建的 preset，飞书发 `/mode` 出**单选卡片**即切（默认 Code：一次执行多步工具调用，更快更省） |
 | 🎛 **权限分级** | 只读 / 工作区写 / **Full access** 三种权限，`/permission` 卡片即切；默认 Full access 全放行 |
 | 🎨 **卡片化命令** | `/mode` `/permission` `/model` `/reasoning` 全部是**单选按钮卡片**——点一下即切换；思考档位从当前模型动态读取并按飞书会话持久化 |
@@ -148,7 +148,7 @@ dsh web
 | `attachments.retentionHours` | `168` | 入站图片/文件的保留时长（小时，默认 7 天；`0` = 永久保留）。默认存系统临时目录，到期自动清扫 |
 | `attachments.dir` | `` | 入站媒体根目录覆盖（空 = 系统 tmpdir；重启生效） |
 
-> 凭据（appId/appSecret）存放在 DSH credentials 服务，不进配置文件；`/lark setup` 扫码自动写入。
+> 凭据（appId/appSecret）存放在 DSH credentials 服务，不进普通配置文件。`/lark setup` 扫码和 Web UI 的 Lark 面板均写入同一安全凭据引用；状态接口只显示 App ID 掩码，不回显 App Secret。
 
 ## 🩺 遇到问题？
 
@@ -199,7 +199,7 @@ MIT — 自由使用、修改、分发。
 
 | Capability | Description |
 | ---- | ---- |
-| 🎯 **One-click auth** | `/lark setup` scans a QR to create the Feishu app (auto-subscribes message events + group-all + reactions). 30-second onboarding; manual `DSH_LARK_APP_ID/SECRET` channel also supported |
+| 🎯 **One-click auth** | `/lark setup` scans a QR to create the Feishu app (auto-subscribes message events + group-all + reactions). The Web UI Lark panel also accepts a manual App ID / App Secret and reconnects after saving |
 | 🧠 **Multi-mode Agent** | Standard / Code / Minimal / Cordis presets + your custom GUI presets; `/mode` shows a **single-select card** — tap to switch (default Code: multi-step tools in one shot) |
 | 🎛 **Permission tiers** | Read-only / workspace-write / **Full access**; `/permission` card switches instantly (Full access by default) |
 | 🎨 **Card-based commands** | `/mode` `/permission` `/model` `/reasoning` are **single-select button cards**; reasoning levels are discovered from the current model and persisted per Lark conversation |

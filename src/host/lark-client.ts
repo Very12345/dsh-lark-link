@@ -22,6 +22,25 @@ export interface LarkCredentials {
 	domain: LarkDomain;
 }
 
+/** Validate credentials submitted by the authenticated local Web UI. */
+export function normalizeManualCredentials(value: unknown): LarkCredentials {
+	if (typeof value !== "object" || value === null || Array.isArray(value))
+		throw new TypeError("凭据请求必须是对象");
+	const input = value as Record<string, unknown>;
+	const appId = String(input.appId ?? "").trim();
+	const appSecret = String(input.appSecret ?? "").trim();
+	const domain: LarkDomain = input.domain === "lark" ? "lark" : "feishu";
+	if (!/^cli_[A-Za-z0-9_-]{4,128}$/.test(appId))
+		throw new TypeError("App ID 格式无效，应以 cli_ 开头");
+	if (
+		appSecret.length < 8 ||
+		appSecret.length > 256 ||
+		/[\s\u0000-\u001f\u007f]/.test(appSecret)
+	)
+		throw new TypeError("App Secret 格式无效");
+	return { appId, appSecret, domain };
+}
+
 /** Minimal credential-store seam — ctx.credentials satisfies this. */
 export interface CredentialsStore {
 	resolve(ref: string): Promise<{ value: string } | undefined>;

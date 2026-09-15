@@ -84,6 +84,7 @@ import {
 	resolveCredentials,
 	persistCredentials,
 	clearCredentials,
+	normalizeManualCredentials,
 	buildLarkClient,
 	type CredentialsStore,
 	type LarkDomain,
@@ -119,6 +120,37 @@ export interface LarkLinkConfig {
 	enabled?: boolean;
 	groupPolicy?: "open" | "mention" | "keywords" | "reply";
 	denyList?: string[];
+}
+
+type WebRequest = AsyncIterable<Uint8Array> & { method?: string };
+type WebResponse = {
+	writeHead(status: number, headers: Record<string, string>): unknown;
+	end(body?: unknown): unknown;
+};
+
+async function readWebJson(req: unknown, limit = 16 * 1024): Promise<unknown> {
+	const chunks: Buffer[] = [];
+	let size = 0;
+	for await (const chunk of req as WebRequest) {
+		const bytes = Buffer.from(chunk);
+		size += bytes.length;
+		if (size > limit) throw new TypeError("请求内容过大");
+		chunks.push(bytes);
+	}
+	try {
+		return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+	} catch {
+		throw new TypeError("请求 JSON 无效");
+	}
+}
+
+function sendWebJson(res: unknown, status: number, value: unknown): void {
+	const r = res as WebResponse;
+	r.writeHead(status, {
+		"Content-Type": "application/json; charset=utf-8",
+		"Cache-Control": "no-store",
+	});
+	r.end(JSON.stringify(value));
 }
 
 /** Bridge state directory (<DSH_HOME>/lark-link, overridable). */
@@ -302,6 +334,14 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	let startBlocker: string | undefined;
 	const maskId = (id: string): string =>
 		id.length <= 8 ? "****" : `${id.slice(0, 6)}…${id.slice(-4)}`;
+	let applyManualCredentials:
+		| ((input: unknown) => Promise<{
+				configured: true;
+				appIdMasked: string;
+				domain: LarkDomain;
+				connState: string;
+		  }>)
+		| undefined;
 
 	// ---- webui QR surface ---------------------------------------------------
 	// /lark setup renders its QR into a PNG served at /plugins/lark-link/qr so
@@ -358,17 +398,56 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 							writeHead(s: number, h: Record<string, string>): unknown;
 							end(body?: unknown): unknown;
 						};
-						const configured = Boolean(
-							await resolveCredentials(credStore, getCfg().credentialRef),
+						const credentials = await resolveCredentials(
+							credStore,
+							getCfg().credentialRef,
 						);
 						r.writeHead(200, {
 							"Content-Type": "application/json; charset=utf-8",
 							"Cache-Control": "no-store",
 						});
-						r.end(JSON.stringify({ ...status.get(), configured }));
+						r.end(
+							JSON.stringify({
+								...status.get(),
+								configured: Boolean(credentials),
+								...(credentials
+									? {
+											appIdMasked: maskId(credentials.appId),
+											domain: credentials.domain,
+									  }
+									: {}),
+							}),
+						);
 					},
 				}),
 			"lark-link: webui status route",
+		);
+		ctx.effect(
+			() =>
+				webServer.register({
+					kind: "exact",
+					path: "/plugins/lark-link/credentials",
+					handler: async (req, res) => {
+						if ((req as WebRequest).method !== "POST") {
+							sendWebJson(res, 405, { ok: false, error: "仅支持 POST" });
+							return;
+						}
+						try {
+							if (!applyManualCredentials)
+								throw new Error("Lark Link 尚未完成初始化");
+							const result = await applyManualCredentials(await readWebJson(req));
+							sendWebJson(res, 200, { ok: true, ...result });
+						} catch (error) {
+							const message =
+								error instanceof Error ? error.message : "手动配置失败";
+							sendWebJson(res, error instanceof TypeError ? 400 : 500, {
+								ok: false,
+								error: message,
+							});
+						}
+					},
+				}),
+			"lark-link: webui manual credentials route",
 		);
 	}
 
@@ -2241,6 +2320,25 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		status.setConn("stopped");
 		lifecycleStarted = false;
 		logger.info("bridge stopped");
+	};
+	applyManualCredentials = async (input) => {
+		const credentials = normalizeManualCredentials(input);
+		await stopBridge();
+		await persistCredentials(
+			credStore,
+			getCfg().credentialRef,
+			credentials,
+		);
+		startBlocker = undefined;
+		await startBridge();
+		if (!lifecycleStarted)
+			throw new Error(startBlocker ?? "飞书连接未能启动，请检查应用凭据");
+		return {
+			configured: true,
+			appIdMasked: maskId(credentials.appId),
+			domain: credentials.domain,
+			connState: status.get().connState,
+		};
 	};
 
 	// ---- tools ------------------------------------------------------------------
