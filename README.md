@@ -47,6 +47,7 @@
 | 📤 **出站多媒体** | 模型经 `lark_send_local_file` 主动回传本地图片/文件（工作区白名单 + 大小校验 + 格式自动降级） |
 | 🩺 **一键诊断** | `/doctor` → **ZIP 诊断包**（含当前会话完整 DSH session log + 脱敏配置 + ISSUE.md），发回飞书，贴给 AI 即可定位 |
 | 👥 **多人隔离与管理** | 每个私聊 chat ID 独立映射到一条 DSH 会话链；Web UI 展示用户 open_id/名称、消息数、最近使用时间、工作区与活动会话，并提供启动、停止和重连按钮 |
+| 💳 **应用级模型访问策略** | Lark 管理面板可勾选该机器人允许使用的模型、设置机器人默认模型和默认工作区；被撤销的模型同时从 `/model` 隐藏并在执行层拒绝，DSH 网页端的全局模型配置不受影响 |
 | ✍️ **Markdown 渲染** | 回复自动检测 markdown → **CardKit 卡片**渲染（标题/列表/代码块/表格），纯文本走文本消息 |
 | 🌊 **可选流式输出** | `/lark-config streaming.enabled=true` 热开 CardKit schema 2.0 流式卡片，逐字打印（默认关，省流量） |
 | 🆕 **长任务目标驱动** | `/goal <目标>` 直接在飞书启动自主长任务闭环；支持 `/goal pause`（暂停）、`/goal resume`（继续）、`/goal clear`（清除）；纯文本自然对话交互，告别冗余看板干扰 |
@@ -152,6 +153,9 @@ dsh web
 > 凭据（appId/appSecret）存放在 DSH credentials 服务，不进普通配置文件。`/lark setup` 扫码和 Web UI 的 Lark 面板均写入同一安全凭据引用；状态接口只显示 App ID 掩码，不回显 App Secret。
 >
 > 手动更换 App ID 时，插件会先停止旧 WebSocket，再清空旧机器人的路由、去重、补发 WAL、发件箱和会话覆盖状态，防止旧机器人消息通过新机器人重放。
+>
+> 模型白名单是强制策略，不只是界面过滤：已有会话若引用刚被取消的模型，会立即回落到该应用的默认允许模型；飞书直接发送 `/model provider/model` 也无法越权。修改默认工作区后，没有单独 `/workspace` 覆盖的会话会在下一条消息新建于该工作区。
+> 为确保运行中会话同步清退被撤销的模型，模型白名单只允许从 Web UI 的 Lark 管理面板修改，不开放 `/lark-config modelAccess=…` 旁路。
 
 ## 🩺 遇到问题？
 
@@ -221,6 +225,7 @@ MIT — 自由使用、修改、分发。
 | 🆕 **Session management** | `/new` opens a fresh session; `/resume` clean-restores a historical session (button/index/id-prefix, resolves true titles, fixes cross-restart session collision); `/workspace <path>` switches; per-session isolated configuration |
 | 🖥 **Reuses DSH Web GUI** | Bridge agents are native DSH sessions; conversations auto-group under their workspace; the web panel shows live Outbox/replay counters |
 | 👥 **Access control** | `allowlist` restricts inbound to specific open_ids; `groupPolicy` (open / mention / keywords / reply); `denyList` command-prefix deny |
+| 💳 **App-scoped model policy** | The Web UI Lark panel selects the models this bot may use plus its default model and workspace; revoked models are filtered from `/model` and rejected again at execution time without changing the host-wide DSH defaults |
 | 🔓 **Full access by default** | Sandbox full access + never-ask approvals |
 
 ## 🚀 Quickstart

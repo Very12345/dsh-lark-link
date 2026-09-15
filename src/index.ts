@@ -40,6 +40,14 @@ import { createMessageHandler } from "./application/message-handler.ts";
 import { startMediaSweeper } from "./application/media-retention.ts";
 import { createUserUsageStore } from "./application/user-usage.ts";
 import {
+	isModelAllowed,
+	modelRef,
+	normalizeModelRefs,
+	parseModelRef,
+	pickEffectiveDefault,
+	type ModelSelection,
+} from "./application/model-access.ts";
+import {
 	createCommandRouter,
 	type DshCommandRegistry,
 } from "./application/command-router.ts";
@@ -234,6 +242,47 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				| undefined;
 		}
 	).get?.("agentDefaultModel");
+	type CatalogModel = { id: string; name?: string };
+	type CatalogGroup = {
+		provider: string;
+		label?: string;
+		models: CatalogModel[];
+	};
+	const llmService = (
+		ctx as unknown as { get?(name: string): unknown }
+	).get?.("llm") as
+		| {
+				listProviders?(): Array<{ id?: string; name?: string }>;
+				listModels?(provider: string): Promise<CatalogModel[]>;
+				resolveModelInfo?(provider: string, model: string): Promise<unknown>;
+		  }
+		| undefined;
+	let modelCatalogCache:
+		| { expiresAt: number; groups: CatalogGroup[] }
+		| undefined;
+	const listModelCatalog = async (): Promise<CatalogGroup[]> => {
+		if (modelCatalogCache && modelCatalogCache.expiresAt > Date.now())
+			return modelCatalogCache.groups;
+		const groups: CatalogGroup[] = [];
+		for (const provider of llmService?.listProviders?.() ?? []) {
+			const providerId = provider.id ?? "";
+			if (!providerId) continue;
+			try {
+				const models = (await llmService?.listModels?.(providerId)) ?? [];
+				if (models.length > 0) {
+					groups.push({
+						provider: providerId,
+						label: provider.name ?? providerId,
+						models,
+					});
+				}
+			} catch {
+				// One unavailable provider must not hide the rest of the catalog.
+			}
+		}
+		modelCatalogCache = { expiresAt: Date.now() + 30_000, groups };
+		return groups;
+	};
 	{
 		const cur = admService?.currentSelection?.();
 		if (cur?.provider && cur.model) {
@@ -241,7 +290,20 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			liveModelSelection.model = cur.model;
 			liveModelSelection.reasoningEffort = cur.reasoningEffort;
 		}
+		const appDefault = parseModelRef(getCfg().modelAccess.defaultModel);
+		if (appDefault) {
+			liveModelSelection.provider = appDefault.provider;
+			liveModelSelection.model = appDefault.model;
+			delete liveModelSelection.reasoningEffort;
+		}
 	}
+	const effectiveBridgeDefault = (): ModelSelection | undefined =>
+		pickEffectiveDefault(
+			getCfg().modelAccess,
+			liveModelSelection.provider && liveModelSelection.model
+				? liveModelSelection
+				: undefined,
+		);
 	const liveModels = new Map<
 		string,
 		{ provider: string; model: string; reasoningEffort?: ReasoningEffortId; override: boolean }
@@ -252,11 +314,26 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		let m = liveModels.get(key);
 		if (!m) {
 			const o = convCfg.get(key);
+			const requested =
+				o.provider && o.model
+					? { provider: o.provider, model: o.model }
+					: effectiveBridgeDefault();
+			const selected =
+				requested && isModelAllowed(getCfg().modelAccess, requested)
+					? requested
+					: effectiveBridgeDefault();
 			m = {
-				provider: o.provider ?? liveModelSelection.provider,
-				model: o.model ?? liveModelSelection.model,
+				provider: selected?.provider ?? "",
+				model: selected?.model ?? "",
 				reasoningEffort: (o.reasoningEffort ?? liveModelSelection.reasoningEffort) as ReasoningEffortId | undefined,
-				override: Boolean(o.provider && o.model),
+				override: Boolean(
+					o.provider &&
+						o.model &&
+						isModelAllowed(getCfg().modelAccess, {
+							provider: o.provider,
+							model: o.model,
+						}),
+				),
 			};
 			liveModels.set(key, m);
 		}
@@ -293,7 +370,20 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			modelSelection: {
 				currentFor: (key: string) => {
 					const m = liveModelFor(key);
-					return m.provider && m.model ? m : undefined;
+					if (
+						m.provider &&
+						m.model &&
+						isModelAllowed(getCfg().modelAccess, m)
+					) {
+						return m;
+					}
+					const fallback = effectiveBridgeDefault();
+					if (!fallback) return undefined;
+					m.provider = fallback.provider;
+					m.model = fallback.model;
+					delete m.reasoningEffort;
+					m.override = false;
+					return m;
 				},
 			},
 			activeSessionId: (key: string) => convCfg.get(key).activeSessionId,
@@ -348,6 +438,12 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	let applyBridgeControl:
 		| ((action: "start" | "stop" | "restart") => Promise<{
 				connState: string;
+		  }>)
+		| undefined;
+	let applyBridgePolicy:
+		| ((input: unknown) => Promise<{
+				modelAccess: ReturnType<typeof getCfg>["modelAccess"];
+				workspaceRoot: string;
 		  }>)
 		| undefined;
 
@@ -485,7 +581,8 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 								preset: overrides.preset,
 							};
 						});
-							sendWebJson(res, 200, {
+						const modelCatalog = await listModelCatalog();
+						sendWebJson(res, 200, {
 							ok: true,
 							instance: { host: hostname(), pid: process.pid },
 							app: credentials
@@ -495,6 +592,14 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 								  }
 								: null,
 							status: status.get(),
+							policy: {
+								modelAccess: getCfg().modelAccess,
+								workspaceRoot: getCfg().workspaceRoot,
+								effectiveDefaultModel: effectiveBridgeDefault()
+									? modelRef(effectiveBridgeDefault()!)
+									: "",
+							},
+							modelCatalog,
 							users,
 						});
 					},
@@ -532,6 +637,32 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 					},
 				}),
 			"lark-link: webui management control route",
+		);
+		ctx.effect(
+			() =>
+				webServer.register({
+					kind: "exact",
+					path: "/plugins/lark-link/policy",
+					handler: async (req, res) => {
+						if ((req as WebRequest).method !== "POST") {
+							sendWebJson(res, 405, { ok: false, error: "仅支持 POST" });
+							return;
+						}
+						try {
+							if (!applyBridgePolicy)
+								throw new Error("Lark Link 尚未完成初始化");
+							const result = await applyBridgePolicy(await readWebJson(req));
+							sendWebJson(res, 200, { ok: true, ...result });
+						} catch (error) {
+							sendWebJson(res, error instanceof TypeError ? 400 : 500, {
+								ok: false,
+								error:
+									error instanceof Error ? error.message : "策略保存失败",
+							});
+						}
+					},
+				}),
+			"lark-link: webui app policy route",
 		);
 	}
 
@@ -1537,17 +1668,6 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				const arg = _rawInput.trim();
 				const modelKey = bridge.conversationKeyFor(msg);
 				const mine = liveModelFor(modelKey);
-				const services = ctx as unknown as {
-					get?(name: string): unknown;
-				};
-				const llm = services.get?.("llm") as
-					| {
-							listProviders?(): Array<{ id?: string; name?: string }>;
-							listModels?(
-								p: string,
-							): Promise<Array<{ id: string; name?: string }>>;
-					  }
-					| undefined;
 				const current =
 					mine.provider && mine.model
 						? { provider: mine.provider, model: mine.model }
@@ -1559,18 +1679,17 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 						label?: string;
 						models: Array<{ id: string; name?: string }>;
 					}> = [];
-					const providers = llm?.listProviders?.() ?? [];
-					for (const p of providers) {
-						let models: Array<{ id: string; name?: string }> = [];
-						try {
-							models = (await llm?.listModels?.(p.id ?? "")) ?? [];
-						} catch {
-							// adapter without a catalog — skip
-						}
+					for (const p of await listModelCatalog()) {
+						const models = p.models.filter((model) =>
+							isModelAllowed(
+								getCfg().modelAccess,
+								modelRef({ provider: p.provider, model: model.id }),
+							),
+						);
 						if (models.length > 0) {
 							groups.push({
-								provider: p.id ?? "",
-								label: p.name ?? p.id,
+								provider: p.provider,
+								label: p.label ?? p.provider,
 								models,
 							});
 						}
@@ -1582,14 +1701,24 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				let provider = current?.provider ?? "";
 				let model = arg;
 				if (arg.includes("/")) {
-					const [p, m] = arg.split("/");
-					if (p) provider = p.trim();
-					model = (m ?? "").trim();
+					const parsed = parseModelRef(arg);
+					if (parsed) {
+						provider = parsed.provider;
+						model = parsed.model;
+					}
 				}
 				if (!provider || !model) {
 					await durableReply(name, 
 						msg,
 						"用法：/model <provider>/<model> 或 /model <model>",
+					);
+					return true;
+				}
+				if (!isModelAllowed(getCfg().modelAccess, { provider, model })) {
+					await durableReply(
+						name,
+						msg,
+						`该飞书应用未获准使用模型 ${provider}/${model}。请由管理员在 Lark 管理面板中授权。`,
 					);
 					return true;
 				}
@@ -2176,8 +2305,19 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		if (modelPollTimer || !admService?.currentSelection) return;
 		const t = setInterval(() => {
 			try {
+				// An app-specific default intentionally decouples this bridge from
+				// host-wide GUI changes. This is how an admin can keep paid models
+				// available in DSH while withholding them from this bot.
+				if (getCfg().modelAccess.defaultModel) return;
 				const cur = admService?.currentSelection?.();
 				if (!cur?.provider || !cur.model) return;
+				if (
+					!isModelAllowed(getCfg().modelAccess, {
+						provider: cur.provider,
+						model: cur.model,
+					})
+				)
+					return;
 				const sig = `${cur.provider}/${cur.model}/${cur.reasoningEffort ?? "default"}`;
 				if (sig === lastModelSig) return;
 				lastModelSig = sig;
@@ -2405,6 +2545,136 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		status.setConn("stopped");
 		lifecycleStarted = false;
 		logger.info("bridge stopped");
+	};
+	applyBridgePolicy = async (input) => {
+		if (!input || typeof input !== "object" || Array.isArray(input))
+			throw new TypeError("策略内容无效");
+		const body = input as {
+			modelAccess?: {
+				restricted?: unknown;
+				allowedModels?: unknown;
+				defaultModel?: unknown;
+			};
+			workspaceRoot?: unknown;
+		};
+		if (!body.modelAccess || typeof body.modelAccess !== "object")
+			throw new TypeError("缺少模型访问策略");
+		const catalog = await listModelCatalog();
+		const catalogRefs = new Set(
+			catalog.flatMap((group) =>
+				group.models.map((model) =>
+					modelRef({ provider: group.provider, model: model.id }),
+				),
+			),
+		);
+		const restricted = body.modelAccess.restricted === true;
+		const allowedModels = normalizeModelRefs(body.modelAccess.allowedModels);
+		const unknownAllowed = allowedModels.filter((ref) => !catalogRefs.has(ref));
+		if (unknownAllowed.length > 0)
+			throw new TypeError(`以下模型当前不可用: ${unknownAllowed.join(", ")}`);
+		if (restricted && allowedModels.length === 0)
+			throw new TypeError("启用模型白名单时至少保留一个模型");
+		let defaultModel = String(body.modelAccess.defaultModel ?? "").trim();
+		if (defaultModel) {
+			const parsed = parseModelRef(defaultModel);
+			if (!parsed || !catalogRefs.has(modelRef(parsed)))
+				throw new TypeError(`默认模型当前不可用: ${defaultModel}`);
+			defaultModel = modelRef(parsed);
+		}
+		if (restricted && defaultModel && !allowedModels.includes(defaultModel))
+			throw new TypeError("默认模型必须位于允许列表中");
+		if (restricted && !defaultModel) defaultModel = allowedModels[0] ?? "";
+
+		const oldWorkspace = getCfg().workspaceRoot;
+		const workspaceInput = String(body.workspaceRoot ?? "").trim();
+		const workspaceRoot = workspaceInput
+			? resolveWorkspaceTarget(oldWorkspace || process.cwd(), workspaceInput)
+			: "";
+		if (workspaceRoot) {
+			if (!existsSync(workspaceRoot))
+				throw new TypeError(`工作区不存在: ${workspaceRoot}`);
+			if (!statSync(workspaceRoot).isDirectory())
+				throw new TypeError(`工作区不是目录: ${workspaceRoot}`);
+		}
+
+		const nextPolicy = { restricted, allowedModels, defaultModel };
+		const host = admService?.currentSelection?.();
+		const firstCatalogModel = catalog[0]?.models[0]
+			? {
+					provider: catalog[0].provider,
+					model: catalog[0].models[0]!.id,
+			  }
+			: undefined;
+		const nextDefault =
+			pickEffectiveDefault(
+				nextPolicy,
+				host?.provider && host.model
+					? { provider: host.provider, model: host.model }
+					: undefined,
+			) ?? (!restricted ? firstCatalogModel : undefined);
+		if (!nextDefault)
+			throw new TypeError("当前策略无法解析出可用的默认模型");
+		configStore.updateManagementPolicy({
+			modelAccess: nextPolicy,
+			workspaceRoot,
+		});
+		configStore.saveOverrides();
+		liveModelSelection.provider = nextDefault.provider;
+		liveModelSelection.model = nextDefault.model;
+		delete liveModelSelection.reasoningEffort;
+
+		// Existing explicit model overrides that have just been revoked are
+		// cleared immediately. Live agents hold these mutable selections, so the
+		// next turn cannot continue using a removed paid model.
+		for (const key of convCfg.keys()) {
+			const current = convCfg.get(key);
+			if (
+				current.provider &&
+				current.model &&
+				!isModelAllowed(getCfg().modelAccess, {
+					provider: current.provider,
+					model: current.model,
+				})
+			) {
+				convCfg.set(key, {
+					provider: undefined,
+					model: undefined,
+					reasoningEffort: undefined,
+				});
+			}
+		}
+		for (const [key, selection] of liveModels) {
+			if (
+				!selection.override ||
+				!isModelAllowed(getCfg().modelAccess, selection)
+			) {
+				selection.provider = nextDefault.provider;
+				selection.model = nextDefault.model;
+				delete selection.reasoningEffort;
+				selection.override = false;
+				backend?.clearImageUnsupported?.(key);
+			}
+		}
+
+		// A changed default workspace applies to conversations that did not opt
+		// into their own /workspace. Rotate them so the next message really starts
+		// in the new cwd instead of retaining an already-created agent's old cwd.
+		if (workspaceRoot !== oldWorkspace) {
+			const keys = new Set([
+				...liveModels.keys(),
+				...userUsage.list().map((usage) => usage.sessionKey),
+			]);
+			for (const key of keys) {
+				if (convCfg.get(key).workspaceRoot) continue;
+				convCfg.set(key, { activeSessionId: undefined });
+				await conversations.rotate(key);
+			}
+		}
+
+		logger.info(
+			`app policy updated: models=${restricted ? allowedModels.join(",") : "all"} default=${modelRef(nextDefault)} workspace=${workspaceRoot || "process.cwd"}`,
+		);
+		return { modelAccess: getCfg().modelAccess, workspaceRoot };
 	};
 	applyManualCredentials = async (input) => {
 		const credentials = normalizeManualCredentials(input);

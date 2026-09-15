@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.4-webagent.7
+
+### Feature: app-scoped model access and workspace management
+- Added a Web UI policy panel that lists the live DSH model catalog, supports an enforceable per-bot allowlist, and sets an app-specific default model without changing the host-wide DSH default.
+- Model restrictions are enforced in the picker, the `/model` command, and the runtime model-selection resolver. Revoked persisted/live selections immediately fall back to an allowed default, so hidden paid models cannot still be invoked by typing their id.
+- Added a validated default-workspace field. Existing conversations with their own `/workspace` remain untouched; followers rotate so their next message starts in the new default workspace.
+- Added `/plugins/lark-link/policy` management API, catalog caching, persistence tests, and cross-provider model-ref parsing that preserves model ids containing `/`.
+
 ## 0.5.4-webagent.1
 
 ### Feature: per-conversation reasoning effort controls

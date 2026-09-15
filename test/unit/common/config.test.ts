@@ -26,9 +26,28 @@ test("config: overrides persist to disk and reload", () => {
 });
 
 test("config: hot-reloadable keys cover the documented set", () => {
-  for (const key of ["groupPolicy", "groupKeywords", "alsoOnReply", "streaming", "reactions", "denyList", "allowlist"]) {
-    assert.ok(HOT_RELOADABLE.includes(key as never), `${key} should be hot-reloadable`);
-  }
+	for (const key of ["groupPolicy", "groupKeywords", "alsoOnReply", "streaming", "reactions", "denyList", "allowlist", "workspaceRoot"]) {
+		assert.ok(HOT_RELOADABLE.includes(key as never), `${key} should be hot-reloadable`);
+	}
+	assert.equal(HOT_RELOADABLE.includes("modelAccess" as never), false);
+});
+
+test("config: app model access policy deep-merges and persists", () => {
+	const dir = `/tmp/dsh-lark-config-model-policy-${process.pid}`;
+	const store = createConfigStore(dir);
+	store.updateManagementPolicy({
+		modelAccess: {
+			restricted: true,
+			allowedModels: ["webagent/qwen.text.web.3.7-plus"],
+			defaultModel: "webagent/qwen.text.web.3.7-plus",
+		},
+		workspaceRoot: "/tmp",
+	});
+	store.saveOverrides();
+	const reloaded = createConfigStore(dir).get();
+	assert.equal(reloaded.modelAccess.restricted, true);
+	assert.deepEqual(reloaded.modelAccess.allowedModels, ["webagent/qwen.text.web.3.7-plus"]);
+	assert.equal(reloaded.workspaceRoot, "/tmp");
 });
 
 // ---- dotted-path hot reload (streaming.enabled bug) -------------------------

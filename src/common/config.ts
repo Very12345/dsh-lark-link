@@ -7,6 +7,15 @@ import { dirname, join } from "node:path";
 
 export type GroupPolicy = "open" | "mention" | "keywords" | "reply";
 
+export interface ModelAccessConfig {
+	/** false = every DSH model is available; true = only allowedModels. */
+	restricted: boolean;
+	/** Canonical provider/model references available to this Lark application. */
+	allowedModels: string[];
+	/** App-specific default provider/model. Empty = follow the DSH default. */
+	defaultModel: string;
+}
+
 export interface FeishuConfig {
 	/** Ref key into ctx.credentials for the app secret (never the secret itself).
 	 * Must match credentialRef() pattern ^[A-Za-z_][A-Za-z0-9_]*$ (no dots). */
@@ -83,6 +92,8 @@ export interface FeishuConfig {
 	allowlist: string[];
 	/** Bridge agent workspace root (cwd for created sessions). Empty = process.cwd(). */
 	workspaceRoot: string;
+	/** App-scoped model allowlist and default; never changes the host-wide DSH default. */
+	modelAccess: ModelAccessConfig;
 	/**
 	 * Agent preset for bridge sessions. Any preset id the deployment supplies —
 	 * the shipped `standard | code | minimal | cordis`, OR a locally authored
@@ -145,6 +156,11 @@ export const DEFAULT_CONFIG: FeishuConfig = {
 	maxSessions: 32,
 	allowlist: [],
 	workspaceRoot: "",
+	modelAccess: {
+		restricted: false,
+		allowedModels: [],
+		defaultModel: "",
+	},
 	agentPreset: "code",
 	permissionMode: "danger-full-access",
 };
@@ -238,6 +254,11 @@ export interface ConfigStore {
 	get(): FeishuConfig;
 	/** Hot reload a whitelisted partial; returns the effective config. */
 	update(partial: Partial<FeishuConfig>): FeishuConfig;
+	/** Management-only app policy update; deliberately unavailable to /lark-config. */
+	updateManagementPolicy(partial: {
+		modelAccess: ModelAccessConfig;
+		workspaceRoot: string;
+	}): FeishuConfig;
 	/** Persist the current config to disk (for hot overrides). */
 	save(): void;
 	/** Persist overrides to the runtime-overrides.json. */
@@ -278,6 +299,10 @@ export function createConfigStore(
 					throw new Error(`config key "${key}" is not hot-reloadable`);
 				}
 			}
+			overrides = deepMerge(overrides, partial as Partial<FeishuConfig>);
+			return get();
+		},
+		updateManagementPolicy(partial) {
 			overrides = deepMerge(overrides, partial as Partial<FeishuConfig>);
 			return get();
 		},

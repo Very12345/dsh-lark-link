@@ -107,7 +107,29 @@ interface ManagementPayload {
 	ok?: boolean;
 	instance?: { host?: string; pid?: number };
 	status?: StatusPayload;
+	policy?: {
+		modelAccess?: {
+			restricted?: boolean;
+			allowedModels?: string[];
+			defaultModel?: string;
+		};
+		workspaceRoot?: string;
+		effectiveDefaultModel?: string;
+	};
+	modelCatalog?: Array<{
+		provider: string;
+		label?: string;
+		models: Array<{ id: string; name?: string }>;
+	}>;
 	users?: ManagementUser[];
+}
+
+interface PolicyDraft {
+	restricted: boolean;
+	allowedModels: string[];
+	defaultModel: string;
+	workspaceRoot: string;
+	dirty: boolean;
 }
 
 type PanelState =
@@ -192,6 +214,15 @@ export function apply(ctx: ClientContext): void {
 		const [users, setUsers] = useState<ManagementUser[]>([]);
 		const [instanceHost, setInstanceHost] = useState<string>("");
 		const [controlBusy, setControlBusy] = useState<string>("");
+		const [policyOpen, setPolicyOpen] = useState<boolean>(false);
+		const [policySaving, setPolicySaving] = useState<boolean>(false);
+		const [policyDraft, setPolicyDraft] = useState<PolicyDraft | undefined>(
+			undefined,
+		);
+		const [effectiveDefaultModel, setEffectiveDefaultModel] = useState<string>("");
+		const [modelCatalog, setModelCatalog] = useState<
+			NonNullable<ManagementPayload["modelCatalog"]>
+		>([]);
 
 		useEffect(() => {
 			if (!open) return;
@@ -213,6 +244,30 @@ export function apply(ctx: ClientContext): void {
 							setSt((previous) => ({ ...previous, ...management.status }));
 						setInstanceHost(String(management.instance?.host ?? ""));
 						setUsers(Array.isArray(management.users) ? management.users : []);
+						setModelCatalog(
+							Array.isArray(management.modelCatalog)
+								? management.modelCatalog
+								: [],
+						);
+						if (management.policy) {
+							setEffectiveDefaultModel(
+								management.policy.effectiveDefaultModel ?? "",
+							);
+							setPolicyDraft((previous) =>
+								previous?.dirty
+									? previous
+									: {
+											restricted:
+												management.policy?.modelAccess?.restricted === true,
+											allowedModels:
+												management.policy?.modelAccess?.allowedModels ?? [],
+											defaultModel:
+												management.policy?.modelAccess?.defaultModel ?? "",
+											workspaceRoot: management.policy?.workspaceRoot ?? "",
+											dirty: false,
+										},
+							);
+						}
 					})
 					.catch(() => undefined);
 			};
@@ -318,6 +373,51 @@ export function apply(ctx: ClientContext): void {
 					setManualError(error instanceof Error ? error.message : "管理操作失败"),
 				)
 				.finally(() => setControlBusy(""));
+		};
+		const savePolicy = (): void => {
+			if (policySaving || !policyDraft) return;
+			if (policyDraft.restricted && policyDraft.allowedModels.length === 0) {
+				setManualError("启用模型白名单时至少保留一个模型");
+				return;
+			}
+			setPolicySaving(true);
+			setManualError("");
+			setManualNotice("");
+			void win
+				.fetch?.(`${origin}/plugins/lark-link/policy`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						modelAccess: {
+							restricted: policyDraft.restricted,
+							allowedModels: policyDraft.allowedModels,
+							defaultModel: policyDraft.defaultModel,
+						},
+						workspaceRoot: policyDraft.workspaceRoot,
+					}),
+				})
+				.then(async (response) => {
+					const value = (await response.json()) as {
+						ok?: boolean;
+						error?: string;
+						modelAccess?: PolicyDraft;
+						workspaceRoot?: string;
+					};
+					if (!response.ok || !value.ok)
+						throw new Error(value.error || `保存失败（HTTP ${response.status}）`);
+					setPolicyDraft({
+						restricted: value.modelAccess?.restricted === true,
+						allowedModels: value.modelAccess?.allowedModels ?? [],
+						defaultModel: value.modelAccess?.defaultModel ?? "",
+						workspaceRoot: value.workspaceRoot ?? "",
+						dirty: false,
+					});
+					setManualNotice("模型访问策略和默认工作区已保存。下一轮请求生效。");
+				})
+				.catch((error: unknown) =>
+					setManualError(error instanceof Error ? error.message : "策略保存失败"),
+				)
+				.finally(() => setPolicySaving(false));
 		};
 
 		const button = h(
@@ -576,6 +676,218 @@ export function apply(ctx: ClientContext): void {
 					manualNotice,
 				)
 			: null;
+		const flatModels = modelCatalog.flatMap((group) =>
+			group.models.map((model) => ({
+				ref: `${group.provider}/${model.id}`,
+				label: `${group.label || group.provider} · ${model.name || model.id}`,
+			})),
+		);
+		const policyToggle = h(
+			"button",
+			{
+				type: "button",
+				onClick: () => {
+					setPolicyOpen((value) => !value);
+					setManualError("");
+				},
+				style: {
+					width: "100%",
+					padding: "7px 9px",
+					marginBottom: "10px",
+					border: "1px solid rgba(126,226,168,.4)",
+					borderRadius: "7px",
+					background: "rgba(126,226,168,.1)",
+					color: "#9bf0bb",
+					cursor: "pointer",
+					font: "inherit",
+				},
+			},
+			policyOpen ? "收起模型与工作区设置" : "模型与工作区设置",
+		);
+		const selectableDefaults = flatModels.filter(
+			(model) =>
+				!policyDraft?.restricted ||
+				policyDraft.allowedModels.includes(model.ref),
+		);
+		const policyForm =
+			policyOpen && policyDraft
+				? h(
+						"div",
+						{
+							style: {
+								display: "grid",
+								gap: "8px",
+								padding: "10px",
+								marginBottom: "10px",
+								border: "1px solid rgba(255,255,255,.12)",
+								borderRadius: "8px",
+								background: "rgba(0,0,0,.18)",
+							},
+						},
+						h(
+							"label",
+							{ style: { display: "flex", gap: "7px", alignItems: "center" } },
+							h("input", {
+								type: "checkbox",
+								checked: policyDraft.restricted,
+								onChange: (event: unknown) => {
+									const restricted = Boolean(
+										(event as { target?: { checked?: unknown } }).target?.checked,
+									);
+									setPolicyDraft((previous) => {
+										if (!previous) return previous;
+										const allowedModels =
+											restricted && previous.allowedModels.length === 0
+												? flatModels.map((model) => model.ref)
+												: previous.allowedModels;
+										const defaultModel =
+											restricted && !allowedModels.includes(previous.defaultModel)
+												? allowedModels[0] ?? ""
+												: previous.defaultModel;
+										return {
+											...previous,
+											restricted,
+											allowedModels,
+											defaultModel,
+											dirty: true,
+										};
+									});
+								},
+							}),
+							"启用模型白名单",
+						),
+						h(
+							"div",
+							{ style: { opacity: 0.65, fontSize: "10px" } },
+							"启用后，未勾选模型不会出现在 /model 中，直接指定也会被拒绝。",
+						),
+						policyDraft.restricted
+							? h(
+									"div",
+									{
+										style: {
+											maxHeight: "170px",
+											overflowY: "auto",
+											padding: "4px 6px",
+											border: "1px solid rgba(255,255,255,.1)",
+											borderRadius: "6px",
+										},
+									},
+									...flatModels.map((model) =>
+										h(
+											"label",
+											{
+												key: model.ref,
+												style: {
+													display: "flex",
+													gap: "6px",
+													alignItems: "flex-start",
+													padding: "4px 0",
+												},
+											},
+											h("input", {
+												type: "checkbox",
+												checked: policyDraft.allowedModels.includes(model.ref),
+												onChange: (event: unknown) => {
+													const checked = Boolean(
+														(event as { target?: { checked?: unknown } }).target
+															?.checked,
+													);
+													setPolicyDraft((previous) => {
+														if (!previous) return previous;
+														const allowedModels = checked
+															? Array.from(
+																	new Set([...previous.allowedModels, model.ref]),
+																)
+															: previous.allowedModels.filter(
+																	(value) => value !== model.ref,
+																);
+														return {
+															...previous,
+															allowedModels,
+															defaultModel:
+																previous.defaultModel === model.ref && !checked
+																	? allowedModels[0] ?? ""
+																	: previous.defaultModel,
+															dirty: true,
+														};
+													});
+												},
+											}),
+											h("span", { style: { overflowWrap: "anywhere" } }, model.label),
+										),
+									),
+								)
+							: null,
+						h("label", null, "默认模型"),
+						h(
+							"select",
+							{
+								value: policyDraft.defaultModel,
+								onChange: (event: unknown) =>
+									setPolicyDraft((previous) =>
+										previous
+											? {
+													...previous,
+													defaultModel: valueOf(event),
+													dirty: true,
+												}
+											: previous,
+									),
+								style: fieldStyle,
+							},
+							...(!policyDraft.restricted
+								? [
+										h(
+											"option",
+											{ value: "" },
+											`跟随 DSH 全局默认${effectiveDefaultModel ? `（${effectiveDefaultModel}）` : ""}`,
+										),
+									]
+								: []),
+							...selectableDefaults.map((model) =>
+								h("option", { key: model.ref, value: model.ref }, model.label),
+							),
+						),
+						h("label", null, "默认工作区"),
+						h("input", {
+							type: "text",
+							value: policyDraft.workspaceRoot,
+							placeholder: "留空则使用 DSH 进程工作目录",
+							onChange: (event: unknown) =>
+								setPolicyDraft((previous) =>
+									previous
+										? {
+												...previous,
+												workspaceRoot: valueOf(event),
+												dirty: true,
+											}
+										: previous,
+								),
+							style: fieldStyle,
+						}),
+						h(
+							"button",
+							{
+								type: "button",
+								disabled: policySaving || !policyDraft.dirty,
+								onClick: savePolicy,
+								style: {
+									padding: "8px 10px",
+									border: "none",
+									borderRadius: "7px",
+									background: "#3370ff",
+									color: "white",
+									cursor:
+										policySaving || !policyDraft.dirty ? "default" : "pointer",
+									opacity: policySaving || !policyDraft.dirty ? 0.55 : 1,
+									font: "inherit",
+								},
+							},
+							policySaving ? "保存中…" : "保存访问策略",
+						),
+					)
+				: null;
 		const userRows = users.slice(0, 20).map((user) =>
 			h(
 				"div",
@@ -682,6 +994,8 @@ export function apply(ctx: ClientContext): void {
 					zIndex: 2147483000,
 					minWidth: "300px",
 					maxWidth: "360px",
+					maxHeight: "calc(100vh - 24px)",
+					overflowY: "auto",
 					padding: "14px 16px",
 					background: "rgba(24,26,32,.97)",
 					color: "#e6e8eb",
@@ -732,6 +1046,8 @@ export function apply(ctx: ClientContext): void {
 			credentialSummary,
 			controls,
 			notice,
+			policyToggle,
+			policyForm,
 			manualToggle,
 			manualForm,
 			userPanel,
