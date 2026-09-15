@@ -26,8 +26,7 @@ export interface FeishuConfig {
 	groupKeywords: string[];
 	/** Also trigger when the bot is replied to (groupPolicy reply/mention). */
 	alsoOnReply: boolean;
-	/** Streaming: CardKit schema 2.0. Default OFF (省流量 — pi 31dc3c9:
-	 * 每轮输出直发完整回复；需要流式再热改开启). */
+	/** Streaming: CardKit schema 2.0. Default ON; may be disabled per app. */
 	streaming: {
 		enabled: boolean;
 		printFrequencyMs: number;
@@ -114,9 +113,9 @@ export const DEFAULT_CONFIG: FeishuConfig = {
 	groupKeywords: ["lark", "小斯"],
 	alsoOnReply: true,
 	streaming: {
-		// Default OFF (省流量): 每轮输出直发完整回复，流式卡作为可选增强
-		// (pi 31dc3c9 用户决策)。/lark-config streaming.enabled=true 热改开启。
-		enabled: false,
+		// DSH assistant/chunk text deltas update one live CardKit card; the
+		// complete assistant/message finalizes it and durable Outbox is fallback.
+		enabled: true,
 		printFrequencyMs: 120,
 		printStep: 3,
 	},

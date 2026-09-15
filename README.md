@@ -49,7 +49,7 @@
 | 👥 **多人隔离与管理** | 每个私聊 chat ID 独立映射到一条 DSH 会话链；Web UI 展示用户 open_id/名称、消息数、最近使用时间、工作区与活动会话，并提供启动、停止和重连按钮 |
 | 💳 **应用级模型访问策略** | Lark 管理面板可勾选该机器人允许使用的模型、设置机器人默认模型和默认工作区；被撤销的模型同时从 `/model` 隐藏并在执行层拒绝，DSH 网页端的全局模型配置不受影响 |
 | ✍️ **Markdown 渲染** | 回复自动检测 markdown → **CardKit 卡片**渲染（标题/列表/代码块/表格），纯文本走文本消息 |
-| 🌊 **可选流式输出** | `/lark-config streaming.enabled=true` 热开 CardKit schema 2.0 流式卡片，逐字打印（默认关，省流量） |
+| 🌊 **流式输出** | DSH 的 `assistant/chunk` 文本增量实时更新同一张 CardKit schema 2.0 卡片，完整消息到达后定稿；默认开启，可用 `/lark-config streaming.enabled=false` 关闭 |
 | 🆕 **长任务目标驱动** | `/goal <目标>` 直接在飞书启动自主长任务闭环；支持 `/goal pause`（暂停）、`/goal resume`（继续）、`/goal clear`（清除）；纯文本自然对话交互，告别冗余看板干扰 |
 | 🆕 **会话管理与恢复** | `/new` 当前工作区新起会话；`/resume` 极简卡片恢复历史会话（点选/序号/id 前缀，自动提取会话真实标题，彻底解决跨重启 live session 冲突）；`/workspace <路径>` 切换工作区；按会话完全独立持久化工作区/模型/模式 |
 | 🖥 **复用 DSH Web GUI** | 桥 Agent = 原生 DSH session，聊天/流式/工具卡/设置全由 GUI 呈现；会话自动归入对应工作区（不再"未分组"）；Web 面板实时显示 Outbox/补发计数 |
@@ -142,7 +142,7 @@ dsh web
 | `groupKeywords` | `["lark","bot"]` | `keywords` 模式下的触发词 |
 | `agentPreset` | `code` | Agent preset（shipped：standard/code/minimal/cordis，或 GUI 自建 id） |
 | `permissionMode` | `danger-full-access` | 权限：read-only / workspace-write / danger-full-access |
-| `streaming.enabled` | `false` | CardKit 流式卡片（开=逐字打印） |
+| `streaming.enabled` | `true` | CardKit 流式卡片（默认开启；设为 `false` 可关闭） |
 | `reactions.enabled` | `true` | 表情回执 |
 | `allowlist` | `[]` | open_id 白名单，空 = 所有人可对话 |
 | `denyList` | `[]` | 命令前缀拒绝兜底 |
@@ -220,7 +220,7 @@ MIT — 自由使用、修改、分发。
 | 📤 **Outbound media** | Model sends local files/images via `lark_send_local_file` (workspace whitelist + size/format checks) |
 | 🩺 **One-click diagnostics** | `/doctor` → **ZIP bundle** (full DSH session log + sanitized config + ISSUE.md) back to the chat |
 | ✍️ **Markdown rendering** | Replies auto-render as CardKit cards (headings/lists/code/tables); plain text stays plain |
-| 🌊 **Optional streaming** | `/lark-config streaming.enabled=true` hot-enables CardKit schema 2.0 streaming cards (off by default, saves traffic) |
+| 🌊 **Streaming output** | DSH `assistant/chunk` text deltas update one CardKit schema 2.0 card and the complete message finalizes it; enabled by default, disable with `/lark-config streaming.enabled=false` |
 | 🆕 **Goal-driven long tasks** | `/goal <objective>` launches autonomous long-running task loops directly from Feishu; `/goal pause` / `resume` / `clear` manage execution via clean natural conversation |
 | 🆕 **Session management** | `/new` opens a fresh session; `/resume` clean-restores a historical session (button/index/id-prefix, resolves true titles, fixes cross-restart session collision); `/workspace <path>` switches; per-session isolated configuration |
 | 🖥 **Reuses DSH Web GUI** | Bridge agents are native DSH sessions; conversations auto-group under their workspace; the web panel shows live Outbox/replay counters |
@@ -279,7 +279,7 @@ Suspicious *Already up to date*? Run `dsh plugin --profile web outdated` first �
 | `groupPolicy` | `open` | group trigger: open / mention / keywords / reply |
 | `agentPreset` | `code` | agent preset (standard/code/minimal/cordis or custom) |
 | `permissionMode` | `danger-full-access` | read-only / workspace-write / danger-full-access |
-| `streaming.enabled` | `false` | CardKit streaming cards |
+| `streaming.enabled` | `true` | CardKit streaming cards (enabled by default) |
 | `reactions.enabled` | `true` | reaction receipts |
 | `allowlist` | `[]` | open_id allowlist (empty = everyone) |
 | `denyList` | `[]` | command-prefix deny |

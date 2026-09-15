@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4-webagent.11
+
+### Change: CardKit AI streaming is enabled by default
+- The bridge already consumes real DSH `assistant/chunk` text-delta events, patches one live CardKit element, and finalizes it from `assistant/message`; this is provider/agent streaming rather than a post-response typing simulation.
+- New and unconfigured installations now enable that path by default. An app can still opt out with `/lark-config streaming.enabled=false`; final delivery retains the durable Outbox fallback.
+
 ## 0.5.4-webagent.10
 
 ### Fix: serialize provider turns, not only followup enqueueing

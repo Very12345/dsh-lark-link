@@ -5,7 +5,8 @@ import { deepMerge, createConfigStore, DEFAULT_CONFIG, HOT_RELOADABLE, buildHotR
 test("config: defaults deep-merge with partial overrides", () => {
   const merged = deepMerge(DEFAULT_CONFIG, { groupPolicy: "open", streaming: { enabled: false, printFrequencyMs: 120, printStep: 3 } });
   assert.equal(merged.groupPolicy, "open");
-  assert.equal(merged.streaming.enabled, false);
+  assert.equal(merged.streaming.enabled, false, "explicit override still wins");
+	assert.equal(DEFAULT_CONFIG.streaming.enabled, true, "AI streaming defaults on");
   assert.equal(merged.streaming.printFrequencyMs, DEFAULT_CONFIG.streaming.printFrequencyMs);
   assert.equal(merged.denyList.length, 0);
 });

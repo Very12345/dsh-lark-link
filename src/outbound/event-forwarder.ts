@@ -110,8 +110,8 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         break;
       case "assistant/chunk": {
         // Streaming is volatile preview only (ADR-8); the durable per-turn
-        // delivery happens on assistant/message. When streaming is off
-        // (default, 省流量 — pi 31dc3c9), chunks are ignored entirely.
+        // delivery happens on assistant/message. When an app explicitly
+        // disables streaming, chunks are ignored entirely.
         const { streamingEnabled } = deps.cfg();
         if (!streamingEnabled) return;
         st.acc += event.text;
