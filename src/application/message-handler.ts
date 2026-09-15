@@ -18,6 +18,9 @@ export interface MessageHandlerDeps {
 	groupTrigger: { shouldTrigger(msg: FeishuInboundMessage): boolean };
 	/** Inbound dedupe: add returns false when already seen. */
 	dedupe: { add(messageId: string): boolean };
+	usage?: {
+		recordInbound(sessionKey: string, message: FeishuInboundMessage): void;
+	};
 	/** Owner allowlist getter (empty = all allowed); hot-reload friendly. */
 	allowlist: () => string[];
 	/** Called when a message was reinjected by missed-compensation. */
@@ -314,6 +317,11 @@ export function createMessageHandler(deps: MessageHandlerDeps): MessageHandler {
 			logger.info(`drop: group policy for ${msg.chatId}`);
 			return "dropped";
 		}
+		if (!compensated)
+			deps.usage?.recordInbound(
+				deps.ctx.conversations?.keyFor(msg) ?? `${msg.chatType}:${msg.chatId}`,
+				msg,
+			);
 		// 4. reaction receipt (random pool, never DONE) — picker built from live cfg
 		const reactions = deps.ctx.cfg().reactions;
 		if (reactions.enabled) {
@@ -345,6 +353,8 @@ export function createMessageHandler(deps: MessageHandlerDeps): MessageHandler {
 				sessionKey,
 				chatId: msg.chatId,
 				chatType: msg.chatType,
+				senderOpenId: msg.senderOpenId,
+				...(msg.senderName ? { senderName: msg.senderName } : {}),
 				// Remember the trigger message so turn-end can DONE-reaction it.
 				lastMessageId: msg.messageId,
 				updatedAt: Date.now(),

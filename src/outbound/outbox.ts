@@ -59,6 +59,8 @@ export interface Outbox {
   prune(): void;
   /** Crash recovery: anything left 'sending' returns to 'pending'. */
   rebuildFromDisk(): void;
+  /** Drop every app-bound envelope after the bridge has been stopped. */
+  clear(): Promise<void>;
   /** Internal: lanes currently draining (for tests/status). */
   lanes(): string[];
 }
@@ -434,6 +436,23 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     },
     prune: doPrune,
     rebuildFromDisk,
+    async clear() {
+      stopped = true;
+      if (pruneTimer) clearInterval(pruneTimer);
+      pruneTimer = undefined;
+      await Promise.allSettled([...activeDeliveries]);
+      envelopes.clear();
+      lanes.clear();
+      sentKeys.clear();
+      try {
+        for (const file of readdirSync(dir))
+          rmSync(join(dir, file), { recursive: true, force: true });
+      } catch {
+        // best effort; the in-memory queues are already detached
+      }
+      mkdirSync(join(dir, "blobs"), { recursive: true });
+      emitStats();
+    },
     lanes: () => [...lanes.keys()],
   };
 }

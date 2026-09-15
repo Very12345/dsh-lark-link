@@ -31,6 +31,8 @@ export interface ConversationConfigStore {
 	set(key: string, partial: ConversationOverrides): void;
 	/** Clear all overrides for a key. */
 	clear(key: string): void;
+	/** Clear every conversation override when switching bot applications. */
+	clearAll(): void;
 	/** All keys that currently carry at least one override. */
 	keys(): string[];
 }
@@ -80,6 +82,10 @@ export function createConversationConfigStore(
 		},
 		clear(key) {
 			delete data[key];
+			persist();
+		},
+		clearAll() {
+			data = {};
 			persist();
 		},
 		keys() {

@@ -11,6 +11,7 @@ export interface RouteStore {
   upsert(route: Route): void;
   touch(key: string, lastMessageId?: string): void;
   remove(key: string): void;
+  clear(): void;
   prune(maxAgeMs: number): void;
   persist(): void;
 }
@@ -53,6 +54,10 @@ export function createRouteStore(file: string, now: () => number = Date.now): Ro
     },
     remove(key) {
       routes.delete(key);
+      persist();
+    },
+    clear() {
+      routes.clear();
       persist();
     },
     prune(maxAgeMs) {

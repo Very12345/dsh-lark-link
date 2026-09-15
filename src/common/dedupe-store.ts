@@ -13,6 +13,7 @@ export interface DedupeStore {
   add(messageId: string): boolean;
   /** Prune entries older than ttlMs. */
   prune(ttlMs: number): void;
+  clear(): void;
 }
 
 const MAX_RECORDS = 10_000;
@@ -50,6 +51,10 @@ export function createDedupeStore(file: string, now: () => number = Date.now): D
       const before = records.length;
       records = records.filter((r) => r.at >= cutoff);
       if (records.length !== before) persist();
+    },
+    clear() {
+      records = [];
+      persist();
     },
   };
 }

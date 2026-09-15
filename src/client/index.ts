@@ -87,6 +87,29 @@ interface StatusPayload {
 	inboundFailed?: number;
 }
 
+interface ManagementUser {
+	sessionKey: string;
+	chatId: string;
+	chatType: "p2p" | "group";
+	senderOpenId: string;
+	senderName?: string;
+	inboundMessages: number;
+	lastSeenAt: number;
+	activeSessionId?: string;
+	workspaceRoot?: string;
+	provider?: string;
+	model?: string;
+	reasoningEffort?: string;
+	preset?: string;
+}
+
+interface ManagementPayload {
+	ok?: boolean;
+	instance?: { host?: string; pid?: number };
+	status?: StatusPayload;
+	users?: ManagementUser[];
+}
+
 type PanelState =
 	| "loading"
 	| "setup"
@@ -165,6 +188,10 @@ export function apply(ctx: ClientContext): void {
 		const [domain, setDomain] = useState<"feishu" | "lark">("feishu");
 		const [manualSaving, setManualSaving] = useState<boolean>(false);
 		const [manualError, setManualError] = useState<string>("");
+		const [manualNotice, setManualNotice] = useState<string>("");
+		const [users, setUsers] = useState<ManagementUser[]>([]);
+		const [instanceHost, setInstanceHost] = useState<string>("");
+		const [controlBusy, setControlBusy] = useState<string>("");
 
 		useEffect(() => {
 			if (!open) return;
@@ -175,6 +202,19 @@ export function apply(ctx: ClientContext): void {
 					.then((r) => (r.ok ? r.json() : Promise.reject(new Error("status"))))
 					.then((j) => setSt(j as StatusPayload))
 					.catch(() => setSt((prev) => prev));
+				void win
+					.fetch?.(`${origin}/plugins/lark-link/management`)
+					.then((r) =>
+						r.ok ? r.json() : Promise.reject(new Error("management")),
+					)
+					.then((value) => {
+						const management = value as ManagementPayload;
+						if (management.status)
+							setSt((previous) => ({ ...previous, ...management.status }));
+						setInstanceHost(String(management.instance?.host ?? ""));
+						setUsers(Array.isArray(management.users) ? management.users : []);
+					})
+					.catch(() => undefined);
 			};
 			fetchStatus();
 			const stId = setInterval(fetchStatus, 3000);
@@ -202,6 +242,7 @@ export function apply(ctx: ClientContext): void {
 			}
 			setManualSaving(true);
 			setManualError("");
+			setManualNotice("");
 			void win
 				.fetch?.(`${origin}/plugins/lark-link/credentials`, {
 					method: "POST",
@@ -212,6 +253,7 @@ export function apply(ctx: ClientContext): void {
 					const value = (await response.json()) as {
 						ok?: boolean;
 						error?: string;
+						appSwitched?: boolean;
 						appIdMasked?: string;
 						domain?: "feishu" | "lark";
 						connState?: string;
@@ -220,6 +262,12 @@ export function apply(ctx: ClientContext): void {
 						throw new Error(value.error || `保存失败（HTTP ${response.status}）`);
 					setAppSecret("");
 					setManualOpen(false);
+					setUsers((previous) => (value.appSwitched ? [] : previous));
+					setManualNotice(
+						value.appSwitched
+							? "已切换机器人并清空旧机器人的路由、补发队列和会话映射。"
+							: "凭据已保存，桥接已重新连接。",
+					);
 					setSt((previous) => ({
 						...previous,
 						configured: true,
@@ -234,6 +282,42 @@ export function apply(ctx: ClientContext): void {
 					),
 				)
 				.finally(() => setManualSaving(false));
+		};
+		const runControl = (action: "start" | "stop" | "restart"): void => {
+			if (controlBusy) return;
+			setControlBusy(action);
+			setManualNotice("");
+			setManualError("");
+			void win
+				.fetch?.(`${origin}/plugins/lark-link/control`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ action }),
+				})
+				.then(async (response) => {
+					const value = (await response.json()) as {
+						ok?: boolean;
+						error?: string;
+						connState?: string;
+					};
+					if (!response.ok || !value.ok)
+						throw new Error(value.error || `操作失败（HTTP ${response.status}）`);
+					setSt((previous) => ({
+						...previous,
+						connState: value.connState,
+					}));
+					setManualNotice(
+						action === "stop"
+							? "桥接已停止。"
+							: action === "restart"
+								? "桥接已重新连接。"
+								: "桥接已启动。",
+					);
+				})
+				.catch((error: unknown) =>
+					setManualError(error instanceof Error ? error.message : "管理操作失败"),
+				)
+				.finally(() => setControlBusy(""));
 		};
 
 		const button = h(
@@ -338,7 +422,7 @@ export function apply(ctx: ClientContext): void {
 							fontSize: "11px",
 						},
 					},
-					`当前：${st.appIdMasked} · ${st.domain === "lark" ? "Lark" : "飞书"}`,
+					`当前：${st.appIdMasked} · ${st.domain === "lark" ? "Lark" : "飞书"}${instanceHost ? ` · 主机 ${instanceHost}` : ""}`,
 				)
 			: null;
 		const fieldStyle = {
@@ -447,6 +531,98 @@ export function apply(ctx: ClientContext): void {
 					),
 				)
 			: null;
+		const controlButton = (
+			label: string,
+			action: "start" | "stop" | "restart",
+		): unknown =>
+			h(
+				"button",
+				{
+					type: "button",
+					disabled: Boolean(controlBusy),
+					onClick: () => runControl(action),
+					style: {
+						flex: 1,
+						padding: "6px 7px",
+						border: "1px solid rgba(255,255,255,.16)",
+						borderRadius: "7px",
+						background: "rgba(255,255,255,.06)",
+						color: "inherit",
+						cursor: controlBusy ? "default" : "pointer",
+						font: "inherit",
+					},
+				},
+				controlBusy === action ? "处理中…" : label,
+			);
+		const controls = h(
+			"div",
+			{ style: { display: "flex", gap: "6px", marginBottom: "10px" } },
+			controlButton("启动", "start"),
+			controlButton("停止", "stop"),
+			controlButton("重连", "restart"),
+		);
+		const notice = manualNotice
+			? h(
+					"div",
+					{
+						style: {
+							marginBottom: "10px",
+							padding: "8px",
+							borderRadius: "7px",
+							background: "rgba(126,226,168,.1)",
+							color: "#9bf0bb",
+						},
+					},
+					manualNotice,
+				)
+			: null;
+		const userRows = users.slice(0, 20).map((user) =>
+			h(
+				"div",
+				{
+					key: user.sessionKey,
+					style: {
+						padding: "7px 0",
+						borderTop: "1px solid rgba(255,255,255,.08)",
+					},
+				},
+				h(
+					"div",
+					{ style: { fontWeight: 600, overflowWrap: "anywhere" } },
+					user.senderName || user.senderOpenId,
+				),
+				h(
+					"div",
+					{ style: { opacity: 0.65, fontSize: "10px", overflowWrap: "anywhere" } },
+					`${user.chatType} · ${user.chatId} · ${user.inboundMessages} 条 · ${new Date(user.lastSeenAt).toLocaleString()}`,
+				),
+				user.activeSessionId
+					? h(
+							"div",
+							{ style: { opacity: 0.55, fontSize: "10px", overflowWrap: "anywhere" } },
+							`会话：${user.activeSessionId}`,
+						)
+					: null,
+			),
+		);
+		const userPanel = h(
+			"div",
+			{
+				style: {
+					marginBottom: "10px",
+					maxHeight: "190px",
+					overflowY: "auto",
+				},
+			},
+			h(
+				"div",
+				{ style: { fontWeight: 600, marginBottom: "4px" } },
+				`用户与桥接链（${users.length}）`,
+			),
+			...(userRows.length
+				? userRows
+				: [h("div", { style: { opacity: 0.6 } }, "尚无当前机器人收到的消息")]),
+		);
 
 		// QR only while unconfigured; hidden (but fetched) until it loads.
 		const qrImg = showQr
@@ -554,8 +730,11 @@ export function apply(ctx: ClientContext): void {
 			banner,
 			hint,
 			credentialSummary,
+			controls,
+			notice,
 			manualToggle,
 			manualForm,
+			userPanel,
 			qrImg,
 			qrHint,
 			footer,

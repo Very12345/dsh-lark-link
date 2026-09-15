@@ -74,6 +74,8 @@ export interface InboundWal {
   prune(): void;
   /** Forget a single record entirely (e.g. message could not be resolved). */
   remove(messageId: string): void;
+  /** Remove every app-bound replay record when switching bot applications. */
+  clear(): void;
   /** GH #9: terminal-mark a record that can no longer be replayed (cap/
    *  retention exhausted) so it stops masquerading as accepted. */
   fail(messageId: string): void;
@@ -212,6 +214,17 @@ export function createInboundWal(deps: InboundWalDeps): InboundWal {
     },
     remove(messageId) {
       if (records.delete(messageId)) persistAll();
+    },
+    clear() {
+      records.clear();
+      try {
+        for (const file of readdirSync(dir)) {
+          if (/^seg-.*\.jsonl$/.test(file)) rmSync(join(dir, file), { force: true });
+        }
+      } catch {
+        // best effort; the in-memory boundary is already clean
+      }
+      persistAll();
     },
     failedCount: () =>
       [...records.values()].filter((r) => r.state === "failed").length,

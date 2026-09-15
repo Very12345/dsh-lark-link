@@ -51,6 +51,8 @@ interface RawEvent {
 	}>;
 	sender?: {
 		sender_id?: { open_id?: string; user_id?: string };
+		sender_name?: string;
+		name?: string;
 		sender_type?: string;
 		tenant_key?: string;
 	};
@@ -189,6 +191,9 @@ export function normalizeInbound(
 		raw.sender?.sender_id?.open_id ??
 		raw.operator?.operator_id?.open_id ??
 		"unknown";
+	const senderName = String(
+		raw.sender?.sender_name ?? raw.sender?.name ?? "",
+	).trim();
 
 	const mentions = (msg.mentions ?? [])
 		.map((m) => m.id?.open_id ?? m.id?.user_id ?? m.name ?? "")
@@ -212,6 +217,7 @@ export function normalizeInbound(
 		chatType,
 		chatMode,
 		senderOpenId,
+		...(senderName ? { senderName } : {}),
 		msgType,
 		content: msg.content ?? raw.content ?? "",
 		// Media messages carry NO text — their content is a resource JSON

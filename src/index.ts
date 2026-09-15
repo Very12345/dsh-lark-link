@@ -38,6 +38,7 @@ import {
 } from "./application/bridge-context.ts";
 import { createMessageHandler } from "./application/message-handler.ts";
 import { startMediaSweeper } from "./application/media-retention.ts";
+import { createUserUsageStore } from "./application/user-usage.ts";
 import {
 	createCommandRouter,
 	type DshCommandRegistry,
@@ -91,7 +92,7 @@ import {
 } from "./host/lark-client.ts";
 import * as qrcode from "qrcode-terminal";
 import QRCode from "qrcode";
-import { homedir, tmpdir } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveWorkspaceTarget, resolveInWorkspacePath, isAbsoluteAny } from "./common/paths.ts";
 import {
@@ -176,6 +177,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	});
 	const status = createStatusStore(join(dir, "status.json"));
 	const routeStore = createRouteStore(join(dir, "routes.json"));
+	const userUsage = createUserUsageStore(join(dir, "user-usage.json"));
 	const dedupe = createDedupeStore(join(dir, "dedupe.jsonl"));
 	// Durable inbound-request journal (入站请求补发). Records agent-bound text
 	// requests before enqueue; on boot, accepted-but-undelivered requests are
@@ -337,8 +339,14 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	let applyManualCredentials:
 		| ((input: unknown) => Promise<{
 				configured: true;
+				appSwitched: boolean;
 				appIdMasked: string;
 				domain: LarkDomain;
+				connState: string;
+		  }>)
+		| undefined;
+	let applyBridgeControl:
+		| ((action: "start" | "stop" | "restart") => Promise<{
 				connState: string;
 		  }>)
 		| undefined;
@@ -448,6 +456,82 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 					},
 				}),
 			"lark-link: webui manual credentials route",
+		);
+		ctx.effect(
+			() =>
+				webServer.register({
+					kind: "exact",
+					path: "/plugins/lark-link/management",
+					handler: async (req, res) => {
+						if ((req as WebRequest).method !== "GET") {
+							sendWebJson(res, 405, { ok: false, error: "仅支持 GET" });
+							return;
+						}
+						const credentials = await resolveCredentials(
+							credStore,
+							getCfg().credentialRef,
+						);
+						const users = userUsage.list().map((usage) => {
+							const overrides = convCfg.get(usage.sessionKey);
+							const route = routeStore.get(usage.sessionKey);
+							return {
+								...usage,
+								activeSessionId: overrides.activeSessionId ?? route?.sessionId,
+								workspaceRoot:
+									overrides.workspaceRoot ?? getCfg().workspaceRoot,
+								provider: overrides.provider,
+								model: overrides.model,
+								reasoningEffort: overrides.reasoningEffort,
+								preset: overrides.preset,
+							};
+						});
+							sendWebJson(res, 200, {
+							ok: true,
+							instance: { host: hostname(), pid: process.pid },
+							app: credentials
+								? {
+										appIdMasked: maskId(credentials.appId),
+										domain: credentials.domain,
+								  }
+								: null,
+							status: status.get(),
+							users,
+						});
+					},
+				}),
+			"lark-link: webui management route",
+		);
+		ctx.effect(
+			() =>
+				webServer.register({
+					kind: "exact",
+					path: "/plugins/lark-link/control",
+					handler: async (req, res) => {
+						if ((req as WebRequest).method !== "POST") {
+							sendWebJson(res, 405, { ok: false, error: "仅支持 POST" });
+							return;
+						}
+						try {
+							const body = (await readWebJson(req)) as { action?: unknown };
+							const action = String(body.action ?? "");
+							if (!applyBridgeControl)
+								throw new Error("Lark Link 尚未完成初始化");
+							if (!(["start", "stop", "restart"] as string[]).includes(action))
+								throw new TypeError("不支持的管理操作");
+							const result = await applyBridgeControl(
+								action as "start" | "stop" | "restart",
+							);
+							sendWebJson(res, 200, { ok: true, ...result });
+						} catch (error) {
+							sendWebJson(res, error instanceof TypeError ? 400 : 500, {
+								ok: false,
+								error:
+									error instanceof Error ? error.message : "管理操作失败",
+							});
+						}
+					},
+				}),
+			"lark-link: webui management control route",
 		);
 	}
 
@@ -1968,6 +2052,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		commands: commandRouter,
 		groupTrigger,
 		dedupe,
+		usage: userUsage,
 		allowlist: () => getCfg().allowlist,
 		wal: inboundWal,
 		// Persist inbound Feishu images/files as real local files so a
@@ -2323,7 +2408,32 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	};
 	applyManualCredentials = async (input) => {
 		const credentials = normalizeManualCredentials(input);
+		const previous = await resolveCredentials(
+			credStore,
+			getCfg().credentialRef,
+		);
+		const appSwitched = Boolean(
+			previous && previous.appId !== credentials.appId,
+		);
 		await stopBridge();
+		if (appSwitched) {
+			// Routes, replay WAL, dedupe and outbox payloads belong to one bot
+			// application. Reusing them after an App ID switch can replay the old
+			// bot's messages through the new bot — a cross-application leak.
+			await outbox.clear();
+			routeStore.clear();
+			convCfg.clearAll();
+			dedupe.clear();
+			inboundWal.clear();
+			userUsage.clear();
+			rmSync(join(dir, "conn-history.jsonl"), { force: true });
+			status.refreshCounters({
+				outboxPending: 0,
+				outboxFailed: 0,
+				inboundPending: 0,
+				inboundFailed: 0,
+			});
+		}
 		await persistCredentials(
 			credStore,
 			getCfg().credentialRef,
@@ -2335,10 +2445,19 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			throw new Error(startBlocker ?? "飞书连接未能启动，请检查应用凭据");
 		return {
 			configured: true,
+			appSwitched,
 			appIdMasked: maskId(credentials.appId),
 			domain: credentials.domain,
 			connState: status.get().connState,
 		};
+	};
+	applyBridgeControl = async (action) => {
+		if (action === "stop") await stopBridge();
+		else if (action === "restart") {
+			await stopBridge();
+			await startBridge();
+		} else await startBridge();
+		return { connState: status.get().connState };
 	};
 
 	// ---- tools ------------------------------------------------------------------

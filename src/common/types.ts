@@ -14,6 +14,8 @@ export interface FeishuInboundMessage {
   chatType: ChatType;
   chatMode: ChatMode;
   senderOpenId: string;
+  /** Display name when the event or a future contact lookup supplies one. */
+  senderName?: string;
   /** Bot-internal open id, e.g. ou_… for p2p; oc_… for group chat. */
   senderOpenIdInternal?: string;
   msgType: FeishuMsgType;
@@ -43,6 +45,8 @@ export interface Route {
   sessionId?: string;
   chatId: string;
   chatType: ChatType;
+  senderOpenId?: string;
+  senderName?: string;
   threadMessageId?: string;
   lastMessageId?: string;
   updatedAt: number;
