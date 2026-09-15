@@ -2270,10 +2270,21 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 					);
 					const chatId = routeStore.get(key)?.chatId;
 					if (chatId) {
+						const failure = event.error;
+						const detail = failure?.message ?? "";
+						const diagnostic =
+							failure?.code === "qwen_gateway_rate_limited" ||
+							/Baxia|temporarily rejecting this account/i.test(detail)
+								? "千问网页触发 Baxia 风控；自动退避重试仍被拒绝。请等待冷却，或使用 /model 切换模型后重试。"
+								: failure?.code === "empty_response" || /empty response/i.test(detail)
+									? "千问 SSE 已结束，但没有返回正文或有效工具调用。请重试；持续发生时建议 /new 后再试。"
+									: /output changed before already-streamed content/i.test(detail)
+										? "千问网页在流式输出期间改写了已发送内容，为避免返回截断文本，本轮已拒绝该结果。请重试。"
+										: `模型轮次异常结束${failure?.code ? `（${failure.code}）` : ""}。请重试。`;
 						void sender
 							.sendText(
 								chatId,
-								`⚠️ 本轮没有产出回复（turn ended: ${reason}）。请再发一条消息重试。若仍无回复，请检查 /model 是否指向可用的模型。`,
+								`⚠️ 本轮没有产出回复：${diagnostic}`,
 							)
 							.catch(() => undefined);
 					}

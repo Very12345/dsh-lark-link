@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.4-webagent.12
+
+### Fix: surface the real reason for silent Qwen turns
+- Carry the last sanitized `agent/error` code/message onto a silent `turn/end`, then distinguish Qwen Baxia cooldown exhaustion, empty SSE content, and provider output rewrites in the Feishu failure notice. Internal stacks and secrets remain hidden.
+
 ## 0.5.4-webagent.11
 
 ### Change: CardKit AI streaming is enabled by default

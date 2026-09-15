@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createDshAdapter } from "../../../src/sessions/dsh-adapter.ts";
-import type { DshSessionBackend } from "../../../src/sessions/dsh-session-backend.ts";
+import type { DshSessionBackend, SessionEventOut } from "../../../src/sessions/dsh-session-backend.ts";
 
 test("adapter: cwd/preset/modelSelection are resolved PER KEY (no cross-talk)", async () => {
 	const registry = fakeRegistry();
@@ -570,6 +570,33 @@ test("adapter: listPresets falls back to empty when agentPresets service is abse
 	};
 	const withFailure = mkBackend(ctxOf(registry, undefined, failing));
 	assert.deepEqual(await withFailure.listPresets(), []);
+});
+
+test("adapter: silent turn/end carries a bounded provider error diagnosis", async () => {
+	const registry = fakeRegistry();
+	const backend = mkBackend(ctxOf(registry, undefined));
+	const handle = await backend.ensureAgent("dm:qwen-error");
+	const events: SessionEventOut[] = [];
+	handle.onEvent((event) => events.push(event));
+	const agent = registry.agents.get(handle.sessionId) as {
+		emitAgentError(error: unknown): void;
+		ctx: { emit(event: string, value: unknown): void };
+	};
+	agent.emitAgentError(
+		Object.assign(new Error("Qianwen Web is temporarily rejecting this account/session"), {
+			code: "qwen_gateway_rate_limited",
+		}),
+	);
+	agent.ctx.emit("session/event", {
+		type: "turn/end",
+		data: { reason: { kind: "error" } },
+	});
+	const ended = events.find(
+		(event): event is Extract<SessionEventOut, { type: "turn/end" }> =>
+			event.type === "turn/end",
+	);
+	assert.equal(ended?.error?.code, "qwen_gateway_rate_limited");
+	assert.match(ended?.error?.message ?? "", /temporarily rejecting/);
 });
 
 test("adapter: code/ptc alias follows the live DSH preset roster", async () => {

@@ -32,7 +32,7 @@ export type SessionEventOut =
   | { type: "turn/start" }
   | { type: "assistant/chunk"; text: string }
   | { type: "assistant/message"; text: string }
-  | { type: "turn/end"; reason: string; finalText?: string }
+  | { type: "turn/end"; reason: string; finalText?: string; error?: { message: string; code?: string } }
   | { type: "tool/call"; name: string }
   | { type: "tool/result"; name: string; error?: { name: string; code: string } }
   | { type: "todo/write"; todos: TodoItemState[] }

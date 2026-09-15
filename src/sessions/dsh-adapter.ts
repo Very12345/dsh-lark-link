@@ -277,6 +277,7 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 	// it — the outbound forwarder uses it to rescue a delivery whose
 	// assistant/message event was lost (bridge reload mid-turn, race).
 	const lastAssistantText = new Map<string, string>();
+	const lastAgentError = new Map<string, { message: string; code?: string }>();
 	// Per-key in-flight agent creation. ensureAgent(key) can be called
 	// concurrently (an outbox outbound re-reply racing a live inbound message
 	// right after a DSH restart). Both calls would otherwise see an empty
@@ -478,6 +479,7 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 		// the model's lack of image support does not change with the session.)
 		pendingImageRetry.delete(key);
 		lastAssistantText.delete(key);
+		lastAgentError.delete(key);
 		runNonce = `${Date.now().toString(36)}${Math.random()
 			.toString(36)
 			.slice(2, 6)}`;
@@ -1003,6 +1005,7 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 				listeners.delete(key);
 				pendingImageRetry.delete(key);
 				lastAssistantText.delete(key);
+				lastAgentError.delete(key);
 			},
 		};
 		tracked.set(key, { handle, lastUsedAt: Date.now() });
@@ -1022,7 +1025,10 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 				// assistant text so turn/end can carry it downstream even if
 				// the assistant/message event itself was lost between here and
 				// the outbound forwarder.
-				if (out.type === "turn/start") lastAssistantText.delete(key);
+				if (out.type === "turn/start") {
+					lastAssistantText.delete(key);
+					lastAgentError.delete(key);
+				}
 				if (out.type === "assistant/message" && out.text.trim() !== "") {
 					lastAssistantText.set(key, out.text);
 				}
@@ -1030,6 +1036,9 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 					const final = lastAssistantText.get(key);
 					if (final !== undefined) out.finalText = final;
 					lastAssistantText.delete(key);
+					const failure = lastAgentError.get(key);
+					if (failure) out.error = failure;
+					lastAgentError.delete(key);
 				}
 				const set = listeners.get(key);
 				if (set) for (const fn of set) fn(out);
@@ -1055,6 +1064,10 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 					(errObj?.failure as Record<string, unknown> | undefined)?.code) as
 					| string
 					| undefined;
+				lastAgentError.set(key, {
+					message: errText.slice(0, 500),
+					...(errCode ? { code: String(errCode) } : {}),
+				});
 				deps.logger?.warn(`agent error for ${key}: ${errText}`);
 				// Non-vision model: degrade instead of dying. Mark the
 				// conversation and model (future images → path note only) and retry
