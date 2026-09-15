@@ -2035,9 +2035,10 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 
 	// ---- lifecycle -------------------------------------------------------------
 	let lifecycleStarted = false;
+	let startPromise: Promise<void> | undefined;
 	let supervisor: ReturnType<typeof createConnectionSupervisor> | undefined;
 
-	const startBridge = async (): Promise<void> => {
+	const startBridgeOnce = async (): Promise<void> => {
 		if (lifecycleStarted) return;
 		// Resolve credentials + build the lark client before wiring the transport.
 		// Missing credentials is NOT fatal (the plugin must still load) — bail with
@@ -2207,7 +2208,27 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		})();
 		logger.info("bridge started (in-process) [HMR-RELOAD-MARKER-2]");
 	};
+	const startBridge = (): Promise<void> => {
+		if (lifecycleStarted) return Promise.resolve();
+		if (startPromise) return startPromise;
+		const pending = startBridgeOnce();
+		startPromise = pending;
+		const release = () => {
+			if (startPromise === pending) startPromise = undefined;
+		};
+		void pending.then(release, release);
+		return pending;
+	};
 	const stopBridge = async (): Promise<void> => {
+		const pending = startPromise;
+		if (pending) {
+			try {
+				await pending;
+			} catch {
+				// The start caller owns reporting. Disposal still must wait until the
+				// failed attempt has released every partially-created transport.
+			}
+		}
 		if (!lifecycleStarted) return;
 		logger.info("stopping bridge…");
 		turnSupervisor.stop();
