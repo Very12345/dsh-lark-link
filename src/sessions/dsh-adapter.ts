@@ -972,8 +972,12 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 				} else {
 					pendingImageRetry.delete(key);
 				}
-				// sync, void — errors surface via agent/error and turn/end(rejected)
+				// followup() only queues/wakes; it does not represent turn settlement.
+				// Await whole-agent quiescence so ConversationManager's per-chat FIFO
+				// cannot start another provider webpage request while this one is still
+				// running (Qwen rejects that as CHAT_IN_PROGRESS).
 				agent.followup(message);
+				await agent.whenIdle();
 			},
 			rawAgent: agent,
 			async cancel() {

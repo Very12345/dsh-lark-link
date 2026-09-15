@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4-webagent.10
+
+### Fix: serialize provider turns, not only followup enqueueing
+- `Agent.followup()` is a synchronous queue/wake operation in DSH. The bridge's per-chat FIFO previously released immediately after enqueueing, so boot replay or rapid messages could open overlapping requests against one Qwen webpage chat and fail with `CHAT_IN_PROGRESS` / changed streamed output.
+- The adapter now awaits `Agent.whenIdle()` after every followup. One Feishu chat remains fully serialized through the real turn boundary while different chats still run independently.
+
 ## 0.5.4-webagent.9
 
 ### Fix: live management counters follow real bridge state

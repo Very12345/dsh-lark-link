@@ -56,6 +56,29 @@ test("adapter: currentFor entries are LIVE objects — mutation switches the mod
 	assert.equal(sel.provider, "p2");
 });
 
+test("adapter: followup settles only after the real agent turn becomes idle", async () => {
+	let releaseIdle!: () => void;
+	const idle = new Promise<void>((resolve) => {
+		releaseIdle = resolve;
+	});
+	const registry = fakeRegistry({ whenIdle: () => idle });
+	const backend = createDshAdapter({
+		ctx: ctxOf(registry, undefined),
+		sessionPrefix: "lark-link",
+		logger: silentLogger,
+	});
+	const handle = await backend.ensureAgent("dm:serialized");
+	let settled = false;
+	const pending = handle.followup("first").then(() => {
+		settled = true;
+	});
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(settled, false, "FIFO must remain occupied while the turn runs");
+	releaseIdle();
+	await pending;
+	assert.equal(settled, true);
+});
+
 
 /**
  * createDshAdapter against a minimal fake Cordis ctx + fake AgentRegistry.
@@ -66,7 +89,10 @@ const silentLogger = { info() {}, warn() {} };
 
 /** Minimal AgentRegistry fake — records create opts, returns fake agents. */
 function fakeRegistry(
-	opts: { onEvent?: (agent: unknown, ev: unknown) => void } = {},
+	opts: {
+		onEvent?: (agent: unknown, ev: unknown) => void;
+		whenIdle?: () => Promise<void>;
+	} = {},
 ) {
 	const created: Array<Record<string, unknown>> = [];
 	const resumed: Array<Record<string, unknown>> = [];
@@ -82,7 +108,9 @@ function fakeRegistry(
 			session: { id: sessionId }, // the real Agent exposes its session
 			lastMessage: undefined as { content: Array<Record<string, unknown>> } | undefined,
 			followups: [] as Array<{ content: Array<Record<string, unknown>> }>,
-			async whenIdle() {},
+			async whenIdle() {
+				await opts.whenIdle?.();
+			},
 			followup(message: { content: Array<Record<string, unknown>> }) {
 				(agent as { lastMessage?: unknown }).lastMessage = message;
 				agent.followups.push(message);
