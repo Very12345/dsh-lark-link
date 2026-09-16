@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.4-webagent.14
+
+### Feature: one-card live Agent state
+- Create the CardKit card at `turn/start` and update that same Feishu message through thinking, tool call, tool result, answer generation and completion phases.
+- A silent failed turn now finalizes the live card with the bounded provider diagnosis instead of leaving the user staring at an unchanged message. Empty successful turns are also explicit.
+- Per-session forwarder events are serialized so rapid tool/text events cannot reorder CardKit updates; final output still falls back to the durable Outbox if CardKit fails.
+
+## 0.5.4-webagent.13
+
+### Fix: resumed sessions deliver replies again
+- Subscribe to the resumed Agent context's session-event bus instead of preferring an application-root bus that may exist without rebroadcasting restored-session events.
+- Dispose the session and error subscriptions together, preventing stale listeners across idle sweep and resume cycles.
+
 ## 0.5.4-webagent.12
 
 ### Fix: surface the real reason for silent Qwen turns

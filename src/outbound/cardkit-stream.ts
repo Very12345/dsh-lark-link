@@ -69,6 +69,8 @@ export interface CardKitStreamOptions {
 
 export interface CardKitStreamHandle {
   cardId: string;
+  /** Replace the live phase/status line without appending it to answer text. */
+  status(text: string): Promise<void>;
   /** Append a text delta; the handle sends FULL accumulated text. */
   patch(text: string): Promise<void>;
   /** Finalize: disable streaming, PUT full content. Returns final card id. */
@@ -95,6 +97,7 @@ export function createCardKitStream(
   let inFlight = false;
   let backoffUntil = 0;
   let acc = ""; // accumulated text — the API takes FULL text every push
+  let statusText = "";
   const now = opts.now ?? Date.now;
   const minInterval = opts.minPushIntervalMs ?? opts.printFrequencyMs ?? 800;
 
@@ -142,6 +145,53 @@ export function createCardKitStream(
     res: { card_id?: string; data?: { card_id?: string } } | undefined,
   ): string | undefined => res?.card_id ?? res?.data?.card_id;
 
+  const rendered = (): string =>
+    [statusText.trim(), acc].filter((part) => part.trim() !== "").join("\n\n") || " ";
+
+  const push = async (): Promise<void> => {
+    if (disposed) return;
+    const content = rendered();
+    if (cardId === undefined) {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const created = await opts.api.createCard(createPayload(content, true));
+        cardId = extractCardId(created);
+        if (!cardId) throw new Error("CardKit create returned no card_id");
+        await opts.api.deliverCard(cardId);
+        patchCount++;
+        lastPatchAt = now();
+      } catch (err) {
+        opts.onError?.(err);
+        disposed = true;
+      } finally {
+        inFlight = false;
+      }
+      return;
+    }
+    if (inFlight || patchCount >= MAX_STREAM_PATCHES) return;
+    const currentTime = now();
+    if (currentTime < backoffUntil || currentTime - lastPatchAt < minInterval) return;
+    inFlight = true;
+    lastPatchAt = currentTime;
+    try {
+      await opts.api.streamText(cardId, STREAM_ELEMENT_ID, {
+        content,
+        sequence: nextSeq(),
+        uuid: randomUUID(),
+      });
+      patchCount++;
+    } catch (err) {
+      const errStr = String(err);
+      if (errStr.includes("230020") || errStr.includes("rate limit") || errStr.includes("429")) {
+        backoffUntil = now() + 1500;
+      }
+      opts.onError?.(err);
+    } finally {
+      inFlight = false;
+    }
+  };
+
   return {
     // Live getters — the closure fields mutate after creation (never snapshot).
     get cardId() {
@@ -150,58 +200,14 @@ export function createCardKitStream(
     get disposed() {
       return disposed;
     },
+    async status(text) {
+      statusText = String(text || "").trim();
+      await push();
+    },
     async patch(text) {
       if (disposed) return;
       acc += text;
-      if (cardId === undefined) {
-        if (inFlight) return;
-        inFlight = true;
-        // First chunk: create the streaming entity AND deliver it — an
-        // undelivered entity is invisible to the user.
-        try {
-          const created = await opts.api.createCard(createPayload(acc || " ", true));
-          cardId = extractCardId(created);
-          if (!cardId) throw new Error("CardKit create returned no card_id");
-          await opts.api.deliverCard(cardId);
-          patchCount++;
-          lastPatchAt = now();
-        } catch (err) {
-          opts.onError?.(err);
-          disposed = true;
-          return;
-        } finally {
-          inFlight = false;
-        }
-        return;
-      }
-
-      // Concurrency and rate-limiting gates:
-      if (inFlight) return;
-      if (patchCount >= MAX_STREAM_PATCHES) return; // finalize covers the rest
-
-      const currentTime = now();
-      if (currentTime < backoffUntil) return;
-      if (currentTime - lastPatchAt < minInterval) return;
-
-      inFlight = true;
-      lastPatchAt = currentTime;
-      try {
-        await opts.api.streamText(cardId, STREAM_ELEMENT_ID, {
-          content: acc,
-          sequence: nextSeq(),
-          uuid: randomUUID(),
-        });
-        patchCount++;
-      } catch (err) {
-        const errStr = String(err);
-        if (errStr.includes("230020") || errStr.includes("rate limit") || errStr.includes("429")) {
-          backoffUntil = now() + 1500;
-        }
-        opts.onError?.(err);
-        // Non-fatal: finalize still lands the full content.
-      } finally {
-        inFlight = false;
-      }
+      await push();
     },
     async finalize(fullText) {
       if (disposed) {
@@ -215,7 +221,8 @@ export function createCardKitStream(
         waitCount++;
       }
 
-      const text = fullText || acc;
+      if (fullText) acc = fullText;
+      const text = rendered();
       if (!cardId) {
         // Never streamed a chunk — create a plain (non-streaming) card with
         // the full content and deliver it. Failure PROPAGATES so the caller

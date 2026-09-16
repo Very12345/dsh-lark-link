@@ -26,11 +26,15 @@ function makeForwarder(opts: { streaming?: boolean; failStream?: boolean; finali
   outbox.start();
 
   const streamPatches: string[] = [];
+  const streamStatuses: string[] = [];
   const finalized: string[] = [];
   let doneCount = 0;
   const fakeStream: CardKitStreamHandle = {
     cardId: "card-1",
     disposed: false,
+    async status(t: string) {
+      streamStatuses.push(t);
+    },
     async patch(t: string) {
       streamPatches.push(t);
     },
@@ -60,8 +64,40 @@ function makeForwarder(opts: { streaming?: boolean; failStream?: boolean; finali
     cfg: () => ({ streamingEnabled: opts.streaming ?? true }),
   });
 
-  return { fw, outbox, sent, streamPatches, finalized, doneCount: () => doneCount };
+  return { fw, outbox, sent, streamPatches, streamStatuses, finalized, doneCount: () => doneCount };
 }
+
+test("forwarder: one stream card tracks thinking, tools, output and completion", async () => {
+  const { fw, streamStatuses, streamPatches, finalized, doneCount } = makeForwarder();
+  await fw.onSessionEvent("dm:ou_x", { type: "turn/start" });
+  await fw.onSessionEvent("dm:ou_x", { type: "tool/call", name: "read" });
+  await fw.onSessionEvent("dm:ou_x", { type: "tool/result", name: "read" });
+  await fw.onSessionEvent("dm:ou_x", { type: "assistant/chunk", text: "答案" });
+  await fw.onSessionEvent("dm:ou_x", { type: "assistant/message", text: "答案完成" });
+  await fw.onSessionEvent("dm:ou_x", { type: "turn/end", reason: "completed" });
+  assert.match(streamStatuses[0]!, /思考中/);
+  assert.ok(streamStatuses.some((status) => /正在调用工具.*read/.test(status)));
+  assert.ok(streamStatuses.some((status) => /工具执行完成/.test(status)));
+  assert.ok(streamStatuses.some((status) => /正在生成回复/.test(status)));
+  assert.match(streamStatuses.at(-1)!, /已完成/);
+  assert.deepEqual(streamPatches, ["答案"]);
+  assert.deepEqual(finalized, ["答案完成"]);
+  assert.equal(doneCount(), 1);
+});
+
+test("forwarder: silent failure finalizes the same card with a diagnosis", async () => {
+  const { fw, streamStatuses, finalized, doneCount } = makeForwarder();
+  await fw.onSessionEvent("dm:ou_x", { type: "turn/start" });
+  await fw.onSessionEvent("dm:ou_x", {
+    type: "turn/end",
+    reason: "error",
+    error: { code: "provider_tool_protocol_invalid", message: "missing file_path" },
+  });
+  assert.match(streamStatuses.at(-1)!, /运行异常停止/);
+  assert.match(streamStatuses.at(-1)!, /missing file_path/);
+  assert.deepEqual(finalized, [""]);
+  assert.equal(doneCount(), 0);
+});
 
 test("forwarder: assistant/message settles the final text on the stream card", async () => {
   const { fw, finalized } = makeForwarder();
@@ -89,21 +125,23 @@ test("forwarder: turn/end marks done (real output) but does NOT re-send final (p
   assert.equal(texts.length, 1, "exactly one delivery — no duplicate on turn/end");
 });
 
-test("forwarder: empty output is skipped, no DONE (pi 5ac1c3d)", async () => {
+test("forwarder: empty output becomes an explicit status, no DONE", async () => {
   const { fw, sent, doneCount } = makeForwarder();
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/message", text: "" });
   await fw.onSessionEvent("dm:ou_x", { type: "turn/end", reason: "complete" });
   await new Promise((r) => setTimeout(r, 200));
-  assert.equal(sent.length, 0, "no message for empty output");
+  assert.equal(sent.length, 1, "empty output is observable instead of silent");
+  assert.match((sent[0] as { text: string }).text, /没有文本输出/);
   assert.equal(doneCount(), 0, "no DONE for empty output");
 });
 
-test("forwarder: 'No response.' is treated as empty (pi 5ac1c3d)", async () => {
+test("forwarder: 'No response.' becomes an explicit empty status", async () => {
   const { fw, sent, doneCount } = makeForwarder();
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/message", text: "No response." });
   await fw.onSessionEvent("dm:ou_x", { type: "turn/end", reason: "complete" });
   await new Promise((r) => setTimeout(r, 200));
-  assert.equal(sent.length, 0);
+  assert.equal(sent.length, 1);
+  assert.match((sent[0] as { text: string }).text, /没有文本输出/);
   assert.equal(doneCount(), 0);
 });
 
@@ -225,6 +263,7 @@ test("forwarder: stream handle disposed mid-turn falls through to outbox for fin
   const fakeStream: CardKitStreamHandle = {
     cardId: "",
     disposed: true, // e.g. createCard threw 400 on the first chunk
+    async status() {},
     async patch() {},
     async finalize() {
       throw new Error("Stream handle was disposed");

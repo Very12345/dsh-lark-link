@@ -85,6 +85,30 @@ test("cardkit: first patch creates a streaming card entity and delivers it", asy
   assert.equal(deliver.args[0], stream.cardId);
 });
 
+test("cardkit: status and answer share one live card", async () => {
+  const { api, calls } = fakeApi();
+  let fakeNow = 0;
+  const stream = createCardKitStream({ api, minPushIntervalMs: 1, now: () => fakeNow });
+  await stream.status("🧠 **思考中…**");
+  const firstCard = createPayloadOf(calls) as { body: { elements: Array<{ content: string }> } };
+  assert.match(firstCard.body.elements[0]!.content, /思考中/);
+  fakeNow += 10;
+  await stream.status("🛠️ **正在调用工具** · `read`");
+  fakeNow += 10;
+  await stream.patch("正在分析");
+  fakeNow += 10;
+  await stream.status("✅ **已完成**");
+  await stream.finalize("最终答案");
+
+  assert.equal(calls.filter((call) => call.op === "create").length, 1, "one card entity per turn");
+  assert.equal(calls.filter((call) => call.op === "deliver").length, 1, "one Feishu message per turn");
+  const update = calls.find((call) => call.op === "update")!;
+  const body = update.args[1] as { card: { data: string } };
+  const finalCard = JSON.parse(body.card.data) as { body: { elements: Array<{ content: string }> } };
+  assert.match(finalCard.body.elements[0]!.content, /已完成/);
+  assert.match(finalCard.body.elements[0]!.content, /最终答案/);
+});
+
 test("cardkit: streamText sends FULL accumulated text with strictly increasing sequence", async () => {
   const { api, calls, seqSeen } = fakeApi();
   let fakeNow = 0;

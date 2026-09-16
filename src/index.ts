@@ -2264,7 +2264,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 					logger.warn(
 						`turn ended '${reason}' for ${key} but an image-degrade retry is in flight; skipping error notice`,
 					);
-				} else if (silent) {
+				} else if (silent && !getCfg().streaming.enabled) {
 					logger.warn(
 						`turn ended '${reason}' with no output for ${key}`,
 					);

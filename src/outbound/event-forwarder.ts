@@ -17,7 +17,7 @@ export type BridgeSessionEvent =
   | { type: "turn/start" }
   | { type: "assistant/chunk"; text: string }
   | { type: "assistant/message"; text: string }
-  | { type: "turn/end"; reason: string; finalText?: string }
+  | { type: "turn/end"; reason: string; finalText?: string; error?: { message: string; code?: string } }
   | { type: "tool/call"; name: string }
   | { type: "tool/result"; name: string; error?: { name: string; code: string } }
   | { type: "todo/write"; todos: TodoItemState[] }
@@ -72,16 +72,19 @@ interface SessionState {
   hasOutput: boolean;
   /** True once markDone has been issued (avoid duplicates). */
   doneIssued: boolean;
+  stage: string;
 }
 
 export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
   const state = new Map<string, SessionState>();
+  const queues = new Map<string, Promise<void>>();
 
   const emptyState = (): SessionState => ({
     acc: "",
     lastFlushAt: Date.now(),
     hasOutput: false,
     doneIssued: false,
+    stage: "",
   });
 
   const routeRefFor = (route: Route): RouteRef => ({
@@ -91,7 +94,7 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
     threadMessageId: route.threadMessageId,
   });
 
-  async function onSessionEvent(sessionKey: string, event: BridgeSessionEvent): Promise<void> {
+  async function handleSessionEvent(sessionKey: string, event: BridgeSessionEvent): Promise<void> {
     const route = deps.routeFor(sessionKey);
     if (!route) return; // no Feishu route for this session — nothing to forward
 
@@ -107,6 +110,14 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         st.doneIssued = false;
         st.acc = "";
         st.stream = undefined;
+        st.stage = "thinking";
+        if (deps.cfg().streamingEnabled) {
+          const stream = deps.streamFor(sessionKey)?.ensureStream();
+          if (stream && !stream.disposed) {
+            st.stream = stream;
+            await stream.status("🧠 **思考中…**");
+          }
+        }
         break;
       case "assistant/chunk": {
         // Streaming is volatile preview only (ADR-8); the durable per-turn
@@ -120,6 +131,10 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
           if (stream && !stream.disposed) st.stream = stream;
         }
         if (st.stream && !st.stream.disposed) {
+          if (st.stage !== "answering") {
+            st.stage = "answering";
+            await st.stream.status("✍️ **正在生成回复…**");
+          }
           await st.stream.patch(event.text);
         }
         break;
@@ -137,6 +152,8 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
           // Streaming card active: settle it. On ANY failure fall through to
           // the durable outbox so content is never lost.
           try {
+            st.stage = "completed";
+            await st.stream.status("✅ **已完成**");
             const finalId = await st.stream.finalize(text);
             if (!finalId) throw new Error("CardKit finalize returned empty cardId");
             st.stream = undefined;
@@ -163,14 +180,6 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         // card; issue the DONE reaction ONLY when real output was delivered
         // (pi 5ac1c3d: 空输出不打 DONE).
         st.acc = "";
-        if (st.stream) {
-          try {
-            await st.stream.finalize("");
-          } catch {
-            // ignore
-          }
-          st.stream = undefined;
-        }
         // GH #9 兜底 (rescue): the turn produced assistant output but nothing
         // was durably delivered THIS turn — the assistant/message event was
         // lost (plugin reload mid-turn, subscription re-race), outbox.enqueue
@@ -181,21 +190,60 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         // longer depends solely on the assistant/message callback).
         const rescue = (event.finalText ?? "").trim() !== "" ? event.finalText : "";
         if (!st.hasOutput && rescue && rescue !== "No response.") {
-          try {
-            await deps.outbox.enqueue({
-              dedupeKey: `${sessionKey}:rescue:${rescue.length}:${Date.now()}`,
-              laneKey: sessionKey,
-              route: routeRefFor(route),
-              kind: "assistant-output",
-              payload: { kind: "text", text: rescue },
-            });
-            st.hasOutput = true;
-            deps.onDelivered?.(sessionKey);
-          } catch {
-            // Rescue is best-effort: the record stays undelivered in the
-            // inbound WAL, so boot replay still applies. Never break the
-            // rest of turn/end handling (markDone) on a rescue failure.
+          if (st.stream && !st.stream.disposed) {
+            try {
+              st.stage = "completed";
+              await st.stream.status("✅ **已完成**");
+              await st.stream.finalize(rescue);
+              st.stream = undefined;
+              st.hasOutput = true;
+              deps.onDelivered?.(sessionKey);
+            } catch {
+              st.stream = undefined;
+            }
           }
+          if (!st.hasOutput) {
+            try {
+              await deps.outbox.enqueue({
+                dedupeKey: `${sessionKey}:rescue:${rescue.length}:${Date.now()}`,
+                laneKey: sessionKey,
+                route: routeRefFor(route),
+                kind: "assistant-output",
+                payload: { kind: "text", text: rescue },
+              });
+              st.hasOutput = true;
+              deps.onDelivered?.(sessionKey);
+            } catch {
+              // Boot replay remains available when durable rescue fails.
+            }
+          }
+        }
+        if (!st.hasOutput) {
+          const failed = ["rejected", "failed", "error"].includes(event.reason);
+          const detail = event.error?.message?.trim();
+          const status = failed
+            ? `❌ **运行异常停止，未产出回复**${detail ? `\n\n\`${detail.slice(0, 300)}\`` : ""}`
+            : "⚪ **本轮已结束，但没有文本输出**";
+          const target = deps.streamFor(sessionKey);
+          if (st.stream && !st.stream.disposed) {
+            try {
+              st.stage = failed ? "failed" : "empty";
+              await st.stream.status(status);
+              await st.stream.finalize("");
+            } catch {
+              await target?.fallbackText(status);
+            }
+          } else if (deps.cfg().streamingEnabled) {
+            await target?.fallbackText(status);
+          }
+          st.stream = undefined;
+        } else if (st.stream) {
+          try {
+            await st.stream.finalize("");
+          } catch {
+            // ignore
+          }
+          st.stream = undefined;
         }
         const target = deps.streamFor(sessionKey);
         if (target && st.hasOutput && !st.doneIssued) {
@@ -204,9 +252,26 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         }
         break;
       }
-      case "tool/call":
-      case "tool/result":
-        // Tool activity stays in the DSH GUI (no per-tool Feishu messages).
+      case "tool/call": {
+        if (!deps.cfg().streamingEnabled) break;
+        if (!st.stream || st.stream.disposed) st.stream = deps.streamFor(sessionKey)?.ensureStream();
+        if (st.stream && !st.stream.disposed) {
+          st.stage = "tool";
+          await st.stream.status(`🛠️ **正在调用工具** · \`${event.name || "unknown"}\``);
+        }
+        break;
+      }
+      case "tool/result": {
+        if (!deps.cfg().streamingEnabled) break;
+        if (!st.stream || st.stream.disposed) st.stream = deps.streamFor(sessionKey)?.ensureStream();
+        if (st.stream && !st.stream.disposed) {
+          st.stage = event.error ? "tool-error" : "thinking";
+          await st.stream.status(event.error
+            ? `⚠️ **工具执行失败** · \`${event.name || "unknown"}\``
+            : `✅ **工具执行完成** · \`${event.name || "unknown"}\`\n\n🧠 继续思考…`);
+        }
+        break;
+      }
       case "todo/write":
       case "goal/change":
         // Internal DSH state updates (not sent as Feishu task cards).
@@ -214,8 +279,17 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
     }
   }
 
+  function onSessionEvent(sessionKey: string, event: BridgeSessionEvent): Promise<void> {
+    const next = (queues.get(sessionKey) ?? Promise.resolve()).then(
+      () => handleSessionEvent(sessionKey, event),
+      () => handleSessionEvent(sessionKey, event),
+    );
+    queues.set(sessionKey, next.catch(() => undefined));
+    return next;
+  }
 
   async function finalizeSession(sessionKey: string): Promise<void> {
+    await queues.get(sessionKey)?.catch(() => undefined);
     const st = state.get(sessionKey);
     if (!st) return;
     if (st.acc.length > 0 && st.hasOutput === false) {
@@ -240,6 +314,7 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
       st.stream = undefined;
     }
     state.delete(sessionKey);
+    queues.delete(sessionKey);
   }
 
   return { onSessionEvent, finalizeSession };
