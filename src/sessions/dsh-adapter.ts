@@ -1011,8 +1011,12 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 		tracked.set(key, { handle, lastUsedAt: Date.now() });
 		keyBySession.set(sessionId, key);
 
-		// Context session/event subscription → normalized bridge events.
-		const onFn = c.on ?? agent.ctx.on?.bind(agent.ctx);
+		// Subscribe at the Agent context first. A restored Agent can append
+		// session events without re-broadcasting them through the application
+		// root context; choosing `c.on` merely because it exists then loses the
+		// assistant/message and turn/end events, so Feishu receives no reply even
+		// though the model completed successfully in the durable session log.
+		const onFn = agent.ctx.on?.bind(agent.ctx) ?? c.on?.bind(c);
 		const disp = onFn?.(
 			"session/event",
 			(sess: unknown, ev: SessionEvent) => {
@@ -1044,10 +1048,6 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 				if (set) for (const fn of set) fn(out);
 			},
 		) ?? (() => {});
-		disposers.set(key, disp);
-
-
-
 		// Surface agent-loop failures that dsh-agent-loop's kick() swallows
 		// (its driver catch is empty). Without this, a turn that dies in
 		// prepareCall/step (e.g. missing provider/model after resume) is
@@ -1112,7 +1112,13 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 				}
 			},
 		);
-		disposers.set(key, errDisp);
+		// One key owns both subscriptions. Keeping only errDisp leaked the
+		// session listener across idle disposal/resume cycles and made later
+		// delivery depend on the root event bus by accident.
+		disposers.set(key, () => {
+			disp();
+			errDisp();
+		});
 
 			return handle;
 		})();

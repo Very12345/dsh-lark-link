@@ -484,6 +484,50 @@ test("adapter: activeSessionId persists across dsh restart and is resumed", asyn
 	assert.equal(second.agentId, first.sessionId, "same agent ID after restart");
 });
 
+test("adapter: resumed agent forwards events when the root session bus is silent", async () => {
+	const registry = fakeRegistry();
+	const ctx = ctxOf(registry, undefined) as unknown as {
+		on(event: string, fn: (...args: unknown[]) => void): () => void;
+	};
+	// Real resumed DSH agents may emit on agent.ctx without mirroring the event
+	// to the application root. The root still exposes `on`, which was enough to
+	// make the old adapter subscribe to the wrong bus and silently lose replies.
+	ctx.on = () => () => {};
+	const activeSessions = new Map<string, string | undefined>([
+		["dm:ou_resumed", "lark-link:dm:ou_resumed:oldrun:0"],
+	]);
+	const backend = mkBackend(ctx, undefined, "newrun", activeSessions);
+	const handle = await backend.ensureAgent("dm:ou_resumed");
+	const events: SessionEventOut[] = [];
+	handle.onEvent((event) => events.push(event));
+
+	const agent = registry.agents.get(handle.sessionId) as {
+		ctx: { emit(event: string, value: unknown): void };
+	};
+	agent.ctx.emit("session/event", {
+		type: "assistant/message",
+		seq: 7,
+		time: Date.now(),
+		data: { message: { content: [{ type: "text", text: "resumed reply" }] } },
+	});
+	agent.ctx.emit("session/event", {
+		type: "turn/end",
+		seq: 8,
+		time: Date.now(),
+		data: { reason: { kind: "completed" } },
+	});
+
+	assert.equal(registry.resumed.length, 1, "persisted Agent was resumed");
+	assert.equal(
+		events.find((event) => event.type === "assistant/message")?.text,
+		"resumed reply",
+	);
+	assert.equal(
+		events.find((event) => event.type === "turn/end")?.finalText,
+		"resumed reply",
+	);
+});
+
 test("adapter: create collision falls back to resume existing session", async () => {
 	const registry = fakeRegistry();
 	const ctx = ctxOf(registry, undefined);
