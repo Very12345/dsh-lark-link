@@ -116,16 +116,67 @@ test("cardkit: status and answer share one live card", async () => {
   const body = update.args[1] as { card: { data: string } };
   const finalCard = JSON.parse(body.card.data) as { body: { elements: Array<{ tag: string; content?: string; element_id?: string; img_key?: string; header?: { title?: { content?: string } }; elements?: Array<{ content: string; element_id?: string }> }> } };
   assert.match(finalCard.body.elements.find((element) => element.element_id === STATUS_ELEMENT_ID)?.content ?? "", /已完成/);
-  assert.match(finalCard.body.elements.find((element) => element.element_id === STREAM_ELEMENT_ID)?.content ?? "", /最终答案/);
-  const reasoningPanel = finalCard.body.elements.find((element) => element.header?.title?.content?.startsWith("思考过程"));
+  assert.ok(finalCard.body.elements.some((element) => /最终答案/.test(element.content ?? "")));
+  const reasoningPanel = finalCard.body.elements.find((element) => element.header?.title?.content?.startsWith("思考 "));
   const reasoning = reasoningPanel?.elements?.[0]?.content ?? "";
   assert.match(reasoning, /^```text/);
   assert.match(reasoning, /先读取文件/);
   assert.equal(reasoningPanel?.elements?.[0]?.element_id, REASONING_ELEMENT_ID);
-  const toolPanel = finalCard.body.elements.find((element) => element.header?.title?.content === "工具调用");
+  const toolPanel = finalCard.body.elements.find((element) => element.header?.title?.content?.startsWith("工具 "));
   assert.equal(toolPanel?.elements?.[0]?.element_id, TOOL_ELEMENT_ID);
   assert.match(toolPanel?.elements?.[0]?.content ?? "", /read.*成功/);
   assert.equal(finalCard.body.elements.find((element) => element.tag === "img")?.img_key, "img_v3_generated");
+});
+
+test("cardkit: preserves interleaved reasoning, narration and tool rounds in chronological order", async () => {
+  const { api, calls } = fakeApi();
+  let fakeNow = 0;
+  const stream = createCardKitStream({ api, minPushIntervalMs: 1, statusTickMs: 0, now: () => fakeNow });
+
+  await stream.reasoning("先检查源码");
+  fakeNow += 10;
+  await stream.patch("我先读取配置。", true);
+  fakeNow += 10;
+  await stream.tool("▶️ 调用 `read`", { phase: "call", callId: "c1", title: "read" });
+  fakeNow += 10;
+  await stream.tool("✅ `read` 成功", { phase: "result", callId: "c1", title: "read" });
+  fakeNow += 10;
+  await stream.reasoning("根据配置继续检查");
+  fakeNow += 10;
+  await stream.patch("接着运行测试。", true);
+  fakeNow += 10;
+  await stream.tool("▶️ 调用 `bash`", { phase: "call", callId: "c2", title: "bash" });
+  fakeNow += 10;
+  await stream.tool("✅ `bash` 成功", { phase: "result", callId: "c2", title: "bash" });
+  fakeNow += 10;
+  await stream.patch("全部完成。", true);
+  await stream.finalize("全部完成。");
+
+  const update = calls.filter((call) => call.op === "update").at(-1)!;
+  const body = update.args[1] as { card: { data: string } };
+  const card = JSON.parse(body.card.data) as {
+    body: { elements: Array<{
+      tag: string;
+      content?: string;
+      header?: { title?: { content?: string } };
+      elements?: Array<{ content?: string }>;
+    }> };
+  };
+  const timeline = card.body.elements.slice(1);
+  assert.deepEqual(
+    timeline.map((element) => element.header?.title?.content ?? element.content),
+    [
+      "思考 1",
+      "我先读取配置。",
+      "工具 1 · read",
+      "思考 2",
+      "接着运行测试。",
+      "工具 2 · bash",
+      "全部完成。",
+    ],
+  );
+  assert.match(timeline[2]?.elements?.[0]?.content ?? "", /调用.*read[\s\S]*read.*成功/);
+  assert.match(timeline[5]?.elements?.[0]?.content ?? "", /调用.*bash[\s\S]*bash.*成功/);
 });
 
 test("cardkit: live status timer reports elapsed seconds", async () => {

@@ -73,10 +73,10 @@ export interface CardKitStreamHandle {
   cardId: string;
   /** Replace the live phase/status line without appending it to answer text. */
   status(text: string): Promise<void>;
-  /** Append or replace reasoning inside the collapsed reasoning panel. */
+  /** Append or replace the current reasoning round in the chronological timeline. */
   reasoning(text: string, replace?: boolean): Promise<void>;
-  /** Append one line to the collapsed tool-activity panel. */
-  tool(text: string): Promise<void>;
+  /** Start/update one tool call in the chronological timeline. */
+  tool(text: string, options?: CardKitToolOptions): Promise<void>;
   /** Embed an uploaded Feishu image in the same live answer card. */
   image(imageKey: string, alt?: string): Promise<void>;
   /** Append or replace answer text; the handle sends FULL accumulated text. */
@@ -88,6 +88,12 @@ export interface CardKitStreamHandle {
   disposed: boolean;
 }
 
+export interface CardKitToolOptions {
+  callId?: string;
+  title?: string;
+  phase?: "call" | "result";
+}
+
 const CARD_SCHEMA = "2.0";
 /** element ids are 1–20 chars per CardKit rules. */
 const STREAM_ELEMENT_ID = "stream_md";
@@ -96,6 +102,12 @@ const REASONING_ELEMENT_ID = "reasoning_md";
 const TOOL_ELEMENT_ID = "tool_md";
 /** Safety valve: stop patching beyond this many API calls; finalize covers it. */
 const MAX_STREAM_PATCHES = 400;
+
+type TimelineSegment =
+  | { kind: "reasoning"; id: string; content: string; ordinal: number; order: number }
+  | { kind: "tool"; id: string; content: string; ordinal: number; order: number; callId?: string; title?: string }
+  | { kind: "text"; id: string; content: string; ordinal: number; order: number }
+  | { kind: "image"; imageKey: string; alt: string; order: number };
 
 export function createCardKitStream(
   opts: CardKitStreamOptions,
@@ -107,10 +119,13 @@ export function createCardKitStream(
   let disposed = false;
   let inFlight = false;
   let backoffUntil = 0;
-  let acc = ""; // accumulated text — the API takes FULL text every push
-  let reasoningAcc = "";
-  let toolAcc = "";
-  const imagesAcc: Array<{ imageKey: string; alt: string }> = [];
+  // Preserve the real Agent event order. The old implementation had one
+  // accumulator per kind, flattening R1 → tool1 → text1 → R2 into buckets.
+  const timeline: TimelineSegment[] = [];
+  let nextTimelineOrdinal = 1;
+  let reasoningCount = 0;
+  let toolCount = 0;
+  let textCount = 0;
   let statusText = "";
   let structureSignature = "";
   const now = opts.now ?? Date.now;
@@ -130,8 +145,8 @@ export function createCardKitStream(
   const renderedStatus = (): string => statusText
     ? `${statusText} · **${elapsedSeconds()}s**`
     : `🧠 **思考中** · **${elapsedSeconds()}s**`;
-  const reasoningCode = (): string => {
-    const safe = reasoningAcc.replace(/```/g, "｀｀｀").trim();
+  const reasoningCode = (content: string): string => {
+    const safe = content.replace(/```/g, "｀｀｀").trim();
     return safe ? `\`\`\`text\n${safe}\n\`\`\`` : "*等待模型返回可展示的思考内容…*";
   };
   const panel = (title: string, elementId: string, content: string): unknown => ({
@@ -146,21 +161,43 @@ export function createCardKitStream(
       border: { color: "grey", corner_radius: "5px" },
       elements: [{ tag: "markdown", content, element_id: elementId }],
     });
-  const currentStructure = (): string => `${reasoningAcc ? "r" : ""}${toolAcc ? "t" : ""}i${imagesAcc.length}`;
+  const segmentId = (kind: "reasoning" | "tool" | "text", count: number): string => {
+    if (count === 1) {
+      if (kind === "reasoning") return REASONING_ELEMENT_ID;
+      if (kind === "tool") return TOOL_ELEMENT_ID;
+      return STREAM_ELEMENT_ID;
+    }
+    const prefix = kind === "reasoning" ? "reason" : kind === "tool" ? "tool" : "text";
+    return `${prefix}_${count}`;
+  };
+  const currentStructure = (): string => timeline
+    .map((segment) => segment.kind === "image" ? `i:${segment.order}` : `${segment.kind[0]}:${segment.id}`)
+    .join("|");
   const cardElements = (): unknown[] => {
     const elements: unknown[] = [
       { tag: "markdown", content: renderedStatus(), element_id: STATUS_ELEMENT_ID },
     ];
-    if (reasoningAcc) elements.push(panel("思考过程 · 成功", REASONING_ELEMENT_ID, reasoningCode()));
-    if (toolAcc) elements.push(panel("工具调用", TOOL_ELEMENT_ID, toolAcc));
-    elements.push({ tag: "markdown", content: acc || " ", element_id: STREAM_ELEMENT_ID });
-    for (const image of imagesAcc) elements.push({
-      tag: "img",
-      img_key: image.imageKey,
-      alt: { tag: "plain_text", content: image.alt || "生成图片" },
-      mode: "fit_horizontal",
-      preview: true,
-    });
+    for (const segment of timeline) {
+      if (segment.kind === "reasoning") {
+        elements.push(panel(`思考 ${segment.ordinal}`, segment.id, reasoningCode(segment.content)));
+      } else if (segment.kind === "tool") {
+        elements.push(panel(
+          `工具 ${segment.ordinal}${segment.title ? ` · ${segment.title}` : ""}`,
+          segment.id,
+          segment.content || "*等待工具返回…*",
+        ));
+      } else if (segment.kind === "text") {
+        elements.push({ tag: "markdown", content: segment.content || " ", element_id: segment.id });
+      } else {
+        elements.push({
+          tag: "img",
+          img_key: segment.imageKey,
+          alt: { tag: "plain_text", content: segment.alt || "生成图片" },
+          mode: "fit_horizontal",
+          preview: true,
+        });
+      }
+    }
     return elements;
   };
 
@@ -224,8 +261,9 @@ export function createCardKitStream(
       structureSignature = currentStructure();
       const stamp = now();
       lastPatchAt.set(STATUS_ELEMENT_ID, stamp);
-      lastPatchAt.set(REASONING_ELEMENT_ID, stamp);
-      lastPatchAt.set(STREAM_ELEMENT_ID, stamp);
+      for (const segment of timeline) {
+        if (segment.kind !== "image") lastPatchAt.set(segment.id, stamp);
+      }
       startStatusTimer();
     } catch (err) {
       opts.onError?.(err);
@@ -255,8 +293,9 @@ export function createCardKitStream(
       structureSignature = currentStructure();
       patchCount++;
       const stamp = now();
-      if (reasoningAcc) lastPatchAt.set(REASONING_ELEMENT_ID, stamp);
-      if (toolAcc) lastPatchAt.set(TOOL_ELEMENT_ID, stamp);
+      for (const segment of timeline) {
+        if (segment.kind !== "image") lastPatchAt.set(segment.id, stamp);
+      }
     } catch (err) {
       opts.onError?.(err);
     } finally {
@@ -305,26 +344,79 @@ export function createCardKitStream(
     },
     async reasoning(text, replace = false) {
       if (disposed) return;
-      reasoningAcc = replace ? String(text || "") : reasoningAcc + String(text || "");
+      let segment = timeline.at(-1);
+      if (segment?.kind !== "reasoning") {
+        reasoningCount += 1;
+        segment = {
+          kind: "reasoning",
+          id: segmentId("reasoning", reasoningCount),
+          content: "",
+          ordinal: reasoningCount,
+          order: nextTimelineOrdinal++,
+        };
+        timeline.push(segment);
+      }
+      segment.content = replace ? String(text || "") : segment.content + String(text || "");
       await syncStructure();
-      await pushElement(REASONING_ELEMENT_ID, reasoningCode());
+      await pushElement(segment.id, reasoningCode(segment.content));
     },
-    async tool(text) {
+    async tool(text, options = {}) {
       if (disposed) return;
-      toolAcc += `${toolAcc ? "\n" : ""}${String(text || "").trim()}`;
+      let segment: Extract<TimelineSegment, { kind: "tool" }> | undefined;
+      if (options.phase === "result" && options.callId) {
+        segment = timeline.findLast((entry): entry is Extract<TimelineSegment, { kind: "tool" }> =>
+          entry.kind === "tool" && entry.callId === options.callId);
+      }
+      if (!segment && options.phase !== "call") {
+        const last = timeline.at(-1);
+        if (last?.kind === "tool") segment = last;
+      }
+      if (!segment) {
+        toolCount += 1;
+        segment = {
+          kind: "tool",
+          id: segmentId("tool", toolCount),
+          content: "",
+          ordinal: toolCount,
+          order: nextTimelineOrdinal++,
+          callId: options.callId,
+          title: options.title,
+        };
+        timeline.push(segment);
+      }
+      if (options.title && !segment.title) segment.title = options.title;
+      const normalized = String(text || "").trim();
+      segment.content += `${segment.content && normalized ? "\n\n" : ""}${normalized}`;
       await syncStructure();
-      await pushElement(TOOL_ELEMENT_ID, toolAcc);
+      await pushElement(segment.id, segment.content || "*等待工具返回…*");
     },
     async image(imageKey, alt = "生成图片") {
       if (disposed || !imageKey) return;
-      imagesAcc.push({ imageKey: String(imageKey), alt: String(alt || "生成图片") });
+      timeline.push({
+        kind: "image",
+        imageKey: String(imageKey),
+        alt: String(alt || "生成图片"),
+        order: nextTimelineOrdinal++,
+      });
       await syncStructure();
     },
     async patch(text, replace = false) {
       if (disposed) return;
-      acc = replace ? String(text || "") : acc + String(text || "");
-      await ensureCard();
-      await pushElement(STREAM_ELEMENT_ID, acc || " ");
+      let segment = timeline.at(-1);
+      if (segment?.kind !== "text") {
+        textCount += 1;
+        segment = {
+          kind: "text",
+          id: segmentId("text", textCount),
+          content: "",
+          ordinal: textCount,
+          order: nextTimelineOrdinal++,
+        };
+        timeline.push(segment);
+      }
+      segment.content = replace ? String(text || "") : segment.content + String(text || "");
+      await syncStructure();
+      await pushElement(segment.id, segment.content || " ");
     },
     async finalize(fullText) {
       if (disposed) {
@@ -339,7 +431,21 @@ export function createCardKitStream(
         waitCount++;
       }
 
-      if (fullText) acc = fullText;
+      if (fullText) {
+        let segment = timeline.at(-1);
+        if (segment?.kind !== "text") {
+          textCount += 1;
+          segment = {
+            kind: "text",
+            id: segmentId("text", textCount),
+            content: "",
+            ordinal: textCount,
+            order: nextTimelineOrdinal++,
+          };
+          timeline.push(segment);
+        }
+        segment.content = fullText;
+      }
       if (!cardId) {
         // Never streamed a chunk — create a plain (non-streaming) card with
         // the full content and deliver it. Failure PROPAGATES so the caller

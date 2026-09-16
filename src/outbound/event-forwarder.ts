@@ -186,9 +186,8 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         const text = st.acc.length > event.text.length ? st.acc : event.text;
         st.acc = "";
         if (event.reasoning && st.stream && !st.stream.disposed && !st.reasoningInStep) {
-          const separator = st.reasoningRounds > 0 ? "\n\n---\n\n" : "";
           st.reasoningRounds += 1;
-          await st.stream.reasoning(separator + event.reasoning);
+          await st.stream.reasoning(event.reasoning);
         }
         st.reasoningInStep = false;
         // A tool-use step also emits assistant/message. It is an intermediate
@@ -196,6 +195,10 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         // wait for tool/call → tool/result → the next model step.
         if (event.hasToolCalls) {
           if (st.stream && !st.stream.disposed) {
+            // Some models narrate the next action before emitting tool calls.
+            // Keep that ordinary assistant text in its real timeline position
+            // instead of dropping it or moving it to the final answer bucket.
+            if (text.trim()) await st.stream.patch(text, true);
             st.stage = "thought";
             await st.stream.status("✅ **思考成功**");
           }
@@ -290,7 +293,10 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
           if (event.callId) st.toolNames.set(event.callId, event.name);
           st.stage = "tool";
           const args = safeToolArguments(event.arguments);
-          await st.stream.tool(`▶️ 调用 \`${event.name || "unknown"}\`${args ? fencedDetail(args, "json") : ""}`);
+          await st.stream.tool(
+            `▶️ 调用 \`${event.name || "unknown"}\`${args ? fencedDetail(args, "json") : ""}`,
+            { phase: "call", callId: event.callId, title: event.name || "unknown" },
+          );
           await st.stream.status(`🛠️ **正在调用工具** · \`${event.name || "unknown"}\``);
         }
         break;
@@ -303,10 +309,9 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
           st.stage = "thinking";
           await st.stream.status("🧠 **思考中**");
           if (!st.reasoningInStep) {
-            const separator = st.reasoningRounds > 0 ? "\n\n---\n\n" : "";
             st.reasoningRounds += 1;
             st.reasoningInStep = true;
-            await st.stream.reasoning(separator + event.text);
+            await st.stream.reasoning(event.text);
           } else {
             await st.stream.reasoning(event.text);
           }
@@ -323,9 +328,12 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
           if (event.callId) st.toolNames.delete(event.callId);
           st.stage = event.error ? "tool-error" : "thinking";
           const resultDetail = event.error?.message || event.output || "";
-          await st.stream.tool(event.error
-            ? `❌ \`${toolName}\` 失败${event.error.code ? ` · \`${event.error.code}\`` : ""}${resultDetail ? fencedDetail(resultDetail) : ""}`
-            : `✅ \`${toolName}\` 成功${resultDetail ? fencedDetail(resultDetail) : ""}`);
+          await st.stream.tool(
+            event.error
+              ? `❌ \`${toolName}\` 失败${event.error.code ? ` · \`${event.error.code}\`` : ""}${resultDetail ? fencedDetail(resultDetail) : ""}`
+              : `✅ \`${toolName}\` 成功${resultDetail ? fencedDetail(resultDetail) : ""}`,
+            { phase: "result", callId: event.callId, title: toolName },
+          );
           await st.stream.status(event.error
             ? `⚠️ **工具调用失败** · \`${toolName}\``
             : `✅ **工具调用成功** · \`${toolName}\``);

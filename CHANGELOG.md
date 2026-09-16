@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4-webagent.18
+
+- Preserve the real chronological Agent timeline in the live CardKit message: reasoning, ordinary assistant narration, tool calls/results, later reasoning rounds, images, and the final answer now remain interleaved instead of being flattened by event type.
+- Give every reasoning round and tool call its own collapsed panel. A tool call and its matching result stay together through call-id correlation, including parallel calls.
+- Keep intermediate assistant narration emitted before a tool call instead of dropping it when the assistant message also contains tool calls.
+
 ## 0.5.4-webagent.17
 
 - Preserve every reasoning round in the live CardKit panel instead of replacing earlier rounds with the latest assistant step.

@@ -94,7 +94,7 @@ test("forwarder: one stream card tracks thinking, tools, output and completion",
   assert.ok(streamStatuses.some((status) => /工具调用成功/.test(status)));
   assert.ok(streamStatuses.some((status) => /正在生成回复/.test(status)));
   assert.match(streamStatuses.at(-1)!, /会话结束/);
-  assert.deepEqual(streamReasoning, ["先读取文件", "\n\n---\n\n根据结果继续"]);
+  assert.deepEqual(streamReasoning, ["先读取文件", "根据结果继续"]);
   assert.ok(streamTools.some((line) => /调用.*read/.test(line)));
   assert.ok(streamTools.some((line) => /file_path.*package\.json/s.test(line)));
   assert.ok(streamTools.some((line) => /api_token.*已脱敏/s.test(line)));
