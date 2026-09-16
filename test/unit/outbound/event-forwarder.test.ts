@@ -28,6 +28,7 @@ function makeForwarder(opts: { streaming?: boolean; failStream?: boolean; finali
   const streamPatches: string[] = [];
   const streamStatuses: string[] = [];
   const streamReasoning: string[] = [];
+  const streamTools: string[] = [];
   const finalized: string[] = [];
   let doneCount = 0;
   const fakeStream: CardKitStreamHandle = {
@@ -38,6 +39,9 @@ function makeForwarder(opts: { streaming?: boolean; failStream?: boolean; finali
     },
     async reasoning(t: string) {
       streamReasoning.push(t);
+    },
+    async tool(t: string) {
+      streamTools.push(t);
     },
     async patch(t: string) {
       streamPatches.push(t);
@@ -68,25 +72,29 @@ function makeForwarder(opts: { streaming?: boolean; failStream?: boolean; finali
     cfg: () => ({ streamingEnabled: opts.streaming ?? true }),
   });
 
-  return { fw, outbox, sent, streamPatches, streamStatuses, streamReasoning, finalized, doneCount: () => doneCount };
+  return { fw, outbox, sent, streamPatches, streamStatuses, streamReasoning, streamTools, finalized, doneCount: () => doneCount };
 }
 
 test("forwarder: one stream card tracks thinking, tools, output and completion", async () => {
-  const { fw, streamStatuses, streamPatches, streamReasoning, finalized, doneCount } = makeForwarder();
+  const { fw, streamStatuses, streamPatches, streamReasoning, streamTools, finalized, doneCount } = makeForwarder();
   await fw.onSessionEvent("dm:ou_x", { type: "turn/start" });
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/reasoning", text: "先读取文件" });
-  await fw.onSessionEvent("dm:ou_x", { type: "tool/call", name: "read" });
-  await fw.onSessionEvent("dm:ou_x", { type: "tool/result", name: "read" });
+  await fw.onSessionEvent("dm:ou_x", { type: "assistant/message", text: "", reasoning: "先读取文件", hasToolCalls: true });
+  await fw.onSessionEvent("dm:ou_x", { type: "tool/call", name: "read", callId: "call-1" });
+  await fw.onSessionEvent("dm:ou_x", { type: "tool/result", name: "tool-result", callId: "call-1" });
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/chunk", text: "答案" });
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/message", text: "答案完成" });
   await fw.onSessionEvent("dm:ou_x", { type: "turn/end", reason: "completed" });
   assert.match(streamStatuses[0]!, /思考中/);
   assert.ok(streamStatuses.some((status) => /正在调用工具.*read/.test(status)));
-  assert.ok(streamStatuses.some((status) => /工具执行完成/.test(status)));
+  assert.ok(streamStatuses.some((status) => /思考成功/.test(status)));
+  assert.ok(streamStatuses.some((status) => /工具调用成功/.test(status)));
   assert.ok(streamStatuses.some((status) => /正在生成回复/.test(status)));
   assert.match(streamStatuses.at(-1)!, /会话结束/);
-  assert.deepEqual(streamReasoning, ["先读取文件"]);
-  assert.deepEqual(streamPatches, ["答案"]);
+  assert.deepEqual(streamReasoning, ["先读取文件", "先读取文件"]);
+  assert.ok(streamTools.some((line) => /调用.*read/.test(line)));
+  assert.ok(streamTools.some((line) => /read.*成功/.test(line)));
+  assert.deepEqual(streamPatches, ["答案", "答案完成", "答案完成"]);
   assert.deepEqual(finalized, ["答案完成"]);
   assert.equal(doneCount(), 1);
 });
@@ -107,15 +115,20 @@ test("forwarder: silent failure finalizes the same card with a diagnosis", async
 
 test("forwarder: assistant/message settles the final text on the stream card", async () => {
   const { fw, finalized } = makeForwarder();
+  await fw.onSessionEvent("dm:ou_x", { type: "turn/start" });
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/chunk", text: "hel" });
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/chunk", text: "lo" });
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/message", text: "hello" });
+  assert.deepEqual(finalized, [], "output success is not the end of the Agent turn");
+  await fw.onSessionEvent("dm:ou_x", { type: "turn/end", reason: "completed" });
   assert.deepEqual(finalized, ["hello"]);
 });
 
 test("forwarder: finalize failure falls through to the durable outbox (no content loss)", async () => {
   const { fw, sent } = makeForwarder({ finalizeThrows: true });
+  await fw.onSessionEvent("dm:ou_x", { type: "turn/start" });
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/message", text: "durable content" });
+  await fw.onSessionEvent("dm:ou_x", { type: "turn/end", reason: "completed" });
   await new Promise((r) => setTimeout(r, 200)); // let the outbox drain
   const texts = sent.filter((p) => (p as { kind: string }).kind === "text" && (p as { text: string }).text === "durable content");
   assert.equal(texts.length, 1, "finalize failure fell back to a durable text delivery");
@@ -271,6 +284,7 @@ test("forwarder: stream handle disposed mid-turn falls through to outbox for fin
     disposed: true, // e.g. createCard threw 400 on the first chunk
     async status() {},
     async reasoning() {},
+    async tool() {},
     async patch() {},
     async finalize() {
       throw new Error("Stream handle was disposed");

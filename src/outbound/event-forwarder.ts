@@ -17,10 +17,10 @@ export type BridgeSessionEvent =
   | { type: "turn/start" }
   | { type: "assistant/reasoning"; text: string }
   | { type: "assistant/chunk"; text: string }
-  | { type: "assistant/message"; text: string }
+  | { type: "assistant/message"; text: string; reasoning?: string; hasToolCalls?: boolean }
   | { type: "turn/end"; reason: string; finalText?: string; error?: { message: string; code?: string } }
-  | { type: "tool/call"; name: string }
-  | { type: "tool/result"; name: string; error?: { name: string; code: string } }
+  | { type: "tool/call"; name: string; callId?: string }
+  | { type: "tool/result"; name: string; callId?: string; error?: { name: string; code: string } }
   | { type: "todo/write"; todos: TodoItemState[] }
   | { type: "goal/change"; goal: GoalSnapshotState };
 
@@ -74,6 +74,9 @@ interface SessionState {
   /** True once markDone has been issued (avoid duplicates). */
   doneIssued: boolean;
   stage: string;
+  finalText: string;
+  delivered: boolean;
+  toolNames: Map<string, string>;
 }
 
 export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
@@ -86,6 +89,9 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
     hasOutput: false,
     doneIssued: false,
     stage: "",
+    finalText: "",
+    delivered: false,
+    toolNames: new Map(),
   });
 
   const routeRefFor = (route: Route): RouteRef => ({
@@ -110,6 +116,9 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         st.hasOutput = false;
         st.doneIssued = false;
         st.acc = "";
+        st.finalText = "";
+        st.delivered = false;
+        st.toolNames.clear();
         st.stream = undefined;
         st.stage = "thinking";
         if (deps.cfg().streamingEnabled) {
@@ -142,28 +151,29 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
       }
 
       case "assistant/message": {
-        // Each complete assistant output is delivered as ONE Feishu message
-        // (pi bdbc0a2: 每轮输出逐条发, turn_end 不再重复发最终). Empty output
-        // (e.g. goal-activation turns) is skipped entirely (pi 5ac1c3d).
         const text = st.acc.length > event.text.length ? st.acc : event.text;
         st.acc = "";
+        if (event.reasoning && st.stream && !st.stream.disposed) {
+          await st.stream.reasoning(event.reasoning, true);
+        }
+        // A tool-use step also emits assistant/message. It is an intermediate
+        // model step, not the end of the Agent turn: keep the card alive and
+        // wait for tool/call → tool/result → the next model step.
+        if (event.hasToolCalls) {
+          if (st.stream && !st.stream.disposed) {
+            st.stage = "thought";
+            await st.stream.status("✅ **思考成功**");
+          }
+          return;
+        }
         if (!text || text.trim() === "" || text === "No response.") return;
         st.hasOutput = true;
-        if (st.stream && !st.stream.disposed) {
-          // Streaming card active: settle it. On ANY failure fall through to
-          // the durable outbox so content is never lost.
-          try {
-            st.stage = "completed";
-            await st.stream.status("✅ **会话结束**");
-            const finalId = await st.stream.finalize(text);
-            if (!finalId) throw new Error("CardKit finalize returned empty cardId");
-            st.stream = undefined;
-            deps.onDelivered?.(sessionKey); // card is final — treat as delivered
-            return;
-          } catch {
-            st.stream = undefined;
-            // fall through → outbox
-          }
+        st.finalText = text;
+        if (deps.cfg().streamingEnabled && st.stream && !st.stream.disposed) {
+          st.stage = "output-success";
+          await st.stream.patch(text, true);
+          await st.stream.status("✅ **输出成功**");
+          return;
         }
         await deps.outbox.enqueue({
           dedupeKey: `${sessionKey}:assistant:${text.length}:${Date.now()}`,
@@ -172,50 +182,42 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
           kind: "assistant-output",
           payload: { kind: "text", text },
         });
-        deps.onDelivered?.(sessionKey); // durable enqueue — request is delivered
+        st.delivered = true;
+        deps.onDelivered?.(sessionKey);
         break;
       }
       case "turn/end": {
-        // Turn completion: the last assistant/message was already delivered
-        // (no duplicate final — pi bdbc0a2). Finalize any leftover streaming
-        // card; issue the DONE reaction ONLY when real output was delivered
-        // (pi 5ac1c3d: 空输出不打 DONE).
         st.acc = "";
-        // GH #9 兜底 (rescue): the turn produced assistant output but nothing
-        // was durably delivered THIS turn — the assistant/message event was
-        // lost (plugin reload mid-turn, subscription re-race), outbox.enqueue
-        // threw, or the route only appeared after the message. The adapter
-        // attaches the session's final assistant text to turn/end; enqueue it
-        // now so the user still gets the reply instead of silence. This is
-        // also a SECOND, independent path to onDelivered (the inbound WAL no
-        // longer depends solely on the assistant/message callback).
-        const rescue = (event.finalText ?? "").trim() !== "" ? event.finalText : "";
-        if (!st.hasOutput && rescue && rescue !== "No response.") {
+        const rescue = String(event.finalText ?? "").trim();
+        const final = st.finalText || (rescue !== "No response." ? rescue : "");
+        if (final) st.hasOutput = true;
+        if (st.hasOutput && !st.delivered) {
           if (st.stream && !st.stream.disposed) {
             try {
-              st.stage = "completed";
+              st.stage = "ended";
+              await st.stream.patch(final, true);
               await st.stream.status("✅ **会话结束**");
-              await st.stream.finalize(rescue);
+              await st.stream.finalize(final);
               st.stream = undefined;
-              st.hasOutput = true;
+              st.delivered = true;
               deps.onDelivered?.(sessionKey);
             } catch {
               st.stream = undefined;
             }
           }
-          if (!st.hasOutput) {
+          if (!st.delivered) {
             try {
               await deps.outbox.enqueue({
-                dedupeKey: `${sessionKey}:rescue:${rescue.length}:${Date.now()}`,
+                dedupeKey: `${sessionKey}:final:${final.length}:${Date.now()}`,
                 laneKey: sessionKey,
                 route: routeRefFor(route),
                 kind: "assistant-output",
-                payload: { kind: "text", text: rescue },
+                payload: { kind: "text", text: final },
               });
-              st.hasOutput = true;
+              st.delivered = true;
               deps.onDelivered?.(sessionKey);
             } catch {
-              // Boot replay remains available when durable rescue fails.
+              // Boot replay remains available when durable delivery fails.
             }
           }
         }
@@ -238,16 +240,9 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
             await target?.fallbackText(status);
           }
           st.stream = undefined;
-        } else if (st.stream) {
-          try {
-            await st.stream.finalize("");
-          } catch {
-            // ignore
-          }
-          st.stream = undefined;
         }
         const target = deps.streamFor(sessionKey);
-        if (target && st.hasOutput && !st.doneIssued) {
+        if (target && st.delivered && !st.doneIssued) {
           st.doneIssued = true;
           await target.markDone();
         }
@@ -257,7 +252,9 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         if (!deps.cfg().streamingEnabled) break;
         if (!st.stream || st.stream.disposed) st.stream = deps.streamFor(sessionKey)?.ensureStream();
         if (st.stream && !st.stream.disposed) {
+          if (event.callId) st.toolNames.set(event.callId, event.name);
           st.stage = "tool";
+          await st.stream.tool(`▶️ 调用 \`${event.name || "unknown"}\``);
           await st.stream.status(`🛠️ **正在调用工具** · \`${event.name || "unknown"}\``);
         }
         break;
@@ -277,10 +274,17 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         if (!deps.cfg().streamingEnabled) break;
         if (!st.stream || st.stream.disposed) st.stream = deps.streamFor(sessionKey)?.ensureStream();
         if (st.stream && !st.stream.disposed) {
+          const toolName = event.callId && st.toolNames.get(event.callId)
+            || (event.name === "tool-result" ? "unknown" : event.name)
+            || "unknown";
+          if (event.callId) st.toolNames.delete(event.callId);
           st.stage = event.error ? "tool-error" : "thinking";
+          await st.stream.tool(event.error
+            ? `❌ \`${toolName}\` 失败${event.error.code ? ` · \`${event.error.code}\`` : ""}`
+            : `✅ \`${toolName}\` 成功`);
           await st.stream.status(event.error
-            ? `⚠️ **工具执行失败** · \`${event.name || "unknown"}\``
-            : `✅ **工具执行完成** · \`${event.name || "unknown"}\`\n\n🧠 继续思考…`);
+            ? `⚠️ **工具调用失败** · \`${toolName}\``
+            : `✅ **工具调用成功** · \`${toolName}\``);
         }
         break;
       }

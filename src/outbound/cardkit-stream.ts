@@ -73,10 +73,12 @@ export interface CardKitStreamHandle {
   cardId: string;
   /** Replace the live phase/status line without appending it to answer text. */
   status(text: string): Promise<void>;
-  /** Append a reasoning delta inside the collapsed reasoning panel. */
-  reasoning(text: string): Promise<void>;
-  /** Append a text delta; the handle sends FULL accumulated text. */
-  patch(text: string): Promise<void>;
+  /** Append or replace reasoning inside the collapsed reasoning panel. */
+  reasoning(text: string, replace?: boolean): Promise<void>;
+  /** Append one line to the collapsed tool-activity panel. */
+  tool(text: string): Promise<void>;
+  /** Append or replace answer text; the handle sends FULL accumulated text. */
+  patch(text: string, replace?: boolean): Promise<void>;
   /** Finalize: disable streaming, PUT full content. Returns final card id. */
   finalize(fullText: string): Promise<string>;
   /** Send a plain-text fallback when cards are unavailable. */
@@ -89,6 +91,7 @@ const CARD_SCHEMA = "2.0";
 const STREAM_ELEMENT_ID = "stream_md";
 const STATUS_ELEMENT_ID = "status_md";
 const REASONING_ELEMENT_ID = "reasoning_md";
+const TOOL_ELEMENT_ID = "tool_md";
 /** Safety valve: stop patching beyond this many API calls; finalize covers it. */
 const MAX_STREAM_PATCHES = 400;
 
@@ -104,7 +107,9 @@ export function createCardKitStream(
   let backoffUntil = 0;
   let acc = ""; // accumulated text — the API takes FULL text every push
   let reasoningAcc = "";
+  let toolAcc = "";
   let statusText = "";
+  let structureSignature = "";
   const now = opts.now ?? Date.now;
   const startedAt = now();
   const minInterval = opts.minPushIntervalMs ?? opts.printFrequencyMs ?? 800;
@@ -126,22 +131,28 @@ export function createCardKitStream(
     const safe = reasoningAcc.replace(/```/g, "｀｀｀").trim();
     return safe ? `\`\`\`text\n${safe}\n\`\`\`` : "*等待模型返回可展示的思考内容…*";
   };
-  const cardElements = (): unknown[] => [
-    { tag: "markdown", content: renderedStatus(), element_id: STATUS_ELEMENT_ID },
-    {
+  const panel = (title: string, elementId: string, content: string): unknown => ({
       tag: "collapsible_panel",
       expanded: false,
       header: {
-        title: { tag: "plain_text", content: "思考过程" },
+        title: { tag: "plain_text", content: title },
         icon: { tag: "standard_icon", token: "down-small-ccm_outlined", size: "16px 16px" },
         icon_position: "right",
         icon_expanded_angle: -180,
       },
       border: { color: "grey", corner_radius: "5px" },
-      elements: [{ tag: "markdown", content: reasoningCode(), element_id: REASONING_ELEMENT_ID }],
-    },
-    { tag: "markdown", content: acc || " ", element_id: STREAM_ELEMENT_ID },
-  ];
+      elements: [{ tag: "markdown", content, element_id: elementId }],
+    });
+  const currentStructure = (): string => `${reasoningAcc ? "r" : ""}${toolAcc ? "t" : ""}`;
+  const cardElements = (): unknown[] => {
+    const elements: unknown[] = [
+      { tag: "markdown", content: renderedStatus(), element_id: STATUS_ELEMENT_ID },
+    ];
+    if (reasoningAcc) elements.push(panel("思考过程 · 成功", REASONING_ELEMENT_ID, reasoningCode()));
+    if (toolAcc) elements.push(panel("工具调用", TOOL_ELEMENT_ID, toolAcc));
+    elements.push({ tag: "markdown", content: acc || " ", element_id: STREAM_ELEMENT_ID });
+    return elements;
+  };
 
   const cardJson = (streaming: boolean): string =>
     JSON.stringify({
@@ -200,6 +211,7 @@ export function createCardKitStream(
       if (!cardId) throw new Error("CardKit create returned no card_id");
       await opts.api.deliverCard(cardId);
       patchCount++;
+      structureSignature = currentStructure();
       const stamp = now();
       lastPatchAt.set(STATUS_ELEMENT_ID, stamp);
       lastPatchAt.set(REASONING_ELEMENT_ID, stamp);
@@ -209,6 +221,34 @@ export function createCardKitStream(
       opts.onError?.(err);
       disposed = true;
       stopStatusTimer();
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const syncStructure = async (): Promise<void> => {
+    await ensureCard();
+    if (!cardId || disposed || structureSignature === currentStructure()) return;
+    let waitCount = 0;
+    while (inFlight && waitCount < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      waitCount++;
+    }
+    if (inFlight || !cardId || disposed) return;
+    inFlight = true;
+    try {
+      await opts.api.updateCard(cardId, {
+        card: { type: "card_json", data: cardJson(true) },
+        sequence: nextSeq(),
+        uuid: randomUUID(),
+      });
+      structureSignature = currentStructure();
+      patchCount++;
+      const stamp = now();
+      if (reasoningAcc) lastPatchAt.set(REASONING_ELEMENT_ID, stamp);
+      if (toolAcc) lastPatchAt.set(TOOL_ELEMENT_ID, stamp);
+    } catch (err) {
+      opts.onError?.(err);
     } finally {
       inFlight = false;
     }
@@ -253,15 +293,21 @@ export function createCardKitStream(
       await ensureCard();
       await pushElement(STATUS_ELEMENT_ID, renderedStatus());
     },
-    async reasoning(text) {
+    async reasoning(text, replace = false) {
       if (disposed) return;
-      reasoningAcc += String(text || "");
-      await ensureCard();
+      reasoningAcc = replace ? String(text || "") : reasoningAcc + String(text || "");
+      await syncStructure();
       await pushElement(REASONING_ELEMENT_ID, reasoningCode());
     },
-    async patch(text) {
+    async tool(text) {
       if (disposed) return;
-      acc += text;
+      toolAcc += `${toolAcc ? "\n" : ""}${String(text || "").trim()}`;
+      await syncStructure();
+      await pushElement(TOOL_ELEMENT_ID, toolAcc);
+    },
+    async patch(text, replace = false) {
+      if (disposed) return;
+      acc = replace ? String(text || "") : acc + String(text || "");
       await ensureCard();
       await pushElement(STREAM_ELEMENT_ID, acc || " ");
     },
@@ -344,4 +390,4 @@ export function createCardKitStream(
 
 }
 
-export { CARD_SCHEMA, STREAM_ELEMENT_ID, STATUS_ELEMENT_ID, REASONING_ELEMENT_ID };
+export { CARD_SCHEMA, STREAM_ELEMENT_ID, STATUS_ELEMENT_ID, REASONING_ELEMENT_ID, TOOL_ELEMENT_ID };

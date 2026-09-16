@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.4-webagent.16
+
+### Fix: phase success is not session termination
+- Treat an `assistant/message` containing tool calls as an intermediate model step. Thinking/tool/output phases show their own success state; only the final DSH `turn/end` finalizes the card as “会话结束”.
+- Backfill complete reasoning from the assembled assistant message when live reasoning deltas were missed, fixing expandable-but-empty reasoning panels.
+- Create reasoning and tool-activity collapsible panels independently and only when they contain data. The tool panel records call start plus success/failure using call-id correlation.
+
 ## 0.5.4-webagent.15
 
 ### Feature: elapsed time and folded reasoning

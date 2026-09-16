@@ -129,6 +129,15 @@ function textOf(
 		.join("");
 }
 
+function reasoningOf(
+	blocks: readonly { type: string; text?: string }[] | undefined,
+): string {
+	return (blocks ?? [])
+		.filter((b) => b.type === "reasoning" && b.text !== undefined)
+		.map((b) => b.text)
+		.join("");
+}
+
 function toSessionEventOut(ev: SessionEvent): SessionEventOut | undefined {
 	const raw = ev as unknown as { type: string; data?: any };
 	switch (raw.type) {
@@ -146,15 +155,19 @@ function toSessionEventOut(ev: SessionEvent): SessionEventOut | undefined {
 			return {
 				type: "assistant/message",
 				text: textOf(raw.data?.message?.content),
+				reasoning: reasoningOf(raw.data?.message?.content),
+				hasToolCalls: Array.isArray(raw.data?.message?.content)
+					&& raw.data.message.content.some((block: { type?: string }) => block?.type === "tool-call"),
 			};
 		case "turn/end":
 			return { type: "turn/end", reason: raw.data?.reason?.kind ?? "done" };
 		case "tool/call":
-			return { type: "tool/call", name: raw.data?.name };
+			return { type: "tool/call", name: raw.data?.name, callId: raw.data?.callId };
 		case "tool/result":
 			return {
 				type: "tool/result",
 				name: raw.data?.message?.content?.[0]?.type ?? "?",
+				callId: raw.data?.message?.source?.callId,
 				error: raw.data?.error,
 			};
 		case "todo/write": {

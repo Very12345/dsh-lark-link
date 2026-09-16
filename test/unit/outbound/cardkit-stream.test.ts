@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createCardKitStream, CARD_SCHEMA, STREAM_ELEMENT_ID, STATUS_ELEMENT_ID, REASONING_ELEMENT_ID } from "../../../src/outbound/cardkit-stream.ts";
+import { createCardKitStream, CARD_SCHEMA, STREAM_ELEMENT_ID, STATUS_ELEMENT_ID, REASONING_ELEMENT_ID, TOOL_ELEMENT_ID } from "../../../src/outbound/cardkit-stream.ts";
 
 /**
  * Real CardKit v1 API shapes (official docs, verified 2026-08):
@@ -78,7 +78,7 @@ test("cardkit: first patch creates a streaming card entity and delivers it", asy
   const elements = (card.body as { elements: Array<{ tag: string; element_id?: string }> }).elements;
   assert.equal(elements.find((element) => element.element_id === STREAM_ELEMENT_ID)?.tag, "markdown");
   assert.equal(elements.find((element) => element.element_id === STATUS_ELEMENT_ID)?.tag, "markdown");
-  assert.equal(elements.some((element) => element.tag === "collapsible_panel"), true);
+  assert.equal(elements.some((element) => element.tag === "collapsible_panel"), false, "empty panels stay hidden");
 
   // The card entity must be DELIVERED into the chat (im message with card_id) —
   // creating the entity alone shows nothing to the user.
@@ -93,8 +93,7 @@ test("cardkit: status and answer share one live card", async () => {
   await stream.status("🧠 **思考中…**");
   const firstCard = createPayloadOf(calls) as { body: { elements: Array<{ tag: string; content?: string; element_id?: string; elements?: Array<{ element_id?: string }> }> } };
   assert.match(firstCard.body.elements.find((element) => element.element_id === STATUS_ELEMENT_ID)?.content ?? "", /思考中/);
-  const panel = firstCard.body.elements.find((element) => element.tag === "collapsible_panel");
-  assert.equal(panel?.elements?.[0]?.element_id, REASONING_ELEMENT_ID);
+  assert.equal(firstCard.body.elements.some((element) => element.tag === "collapsible_panel"), false);
   fakeNow += 10;
   await stream.status("🛠️ **正在调用工具** · `read`");
   fakeNow += 10;
@@ -102,19 +101,28 @@ test("cardkit: status and answer share one live card", async () => {
   fakeNow += 10;
   await stream.reasoning("先读取文件，再核对图片。");
   fakeNow += 10;
+  await stream.tool("▶️ 调用 `read`");
+  fakeNow += 10;
+  await stream.tool("✅ `read` 成功");
+  fakeNow += 10;
   await stream.status("✅ **已完成**");
   await stream.finalize("最终答案");
 
   assert.equal(calls.filter((call) => call.op === "create").length, 1, "one card entity per turn");
   assert.equal(calls.filter((call) => call.op === "deliver").length, 1, "one Feishu message per turn");
-  const update = calls.find((call) => call.op === "update")!;
+  const update = calls.filter((call) => call.op === "update").at(-1)!;
   const body = update.args[1] as { card: { data: string } };
-  const finalCard = JSON.parse(body.card.data) as { body: { elements: Array<{ tag: string; content?: string; element_id?: string; elements?: Array<{ content: string }> }> } };
+  const finalCard = JSON.parse(body.card.data) as { body: { elements: Array<{ tag: string; content?: string; element_id?: string; header?: { title?: { content?: string } }; elements?: Array<{ content: string; element_id?: string }> }> } };
   assert.match(finalCard.body.elements.find((element) => element.element_id === STATUS_ELEMENT_ID)?.content ?? "", /已完成/);
   assert.match(finalCard.body.elements.find((element) => element.element_id === STREAM_ELEMENT_ID)?.content ?? "", /最终答案/);
-  const reasoning = finalCard.body.elements.find((element) => element.tag === "collapsible_panel")?.elements?.[0]?.content ?? "";
+  const reasoningPanel = finalCard.body.elements.find((element) => element.header?.title?.content?.startsWith("思考过程"));
+  const reasoning = reasoningPanel?.elements?.[0]?.content ?? "";
   assert.match(reasoning, /^```text/);
   assert.match(reasoning, /先读取文件/);
+  assert.equal(reasoningPanel?.elements?.[0]?.element_id, REASONING_ELEMENT_ID);
+  const toolPanel = finalCard.body.elements.find((element) => element.header?.title?.content === "工具调用");
+  assert.equal(toolPanel?.elements?.[0]?.element_id, TOOL_ELEMENT_ID);
+  assert.match(toolPanel?.elements?.[0]?.content ?? "", /read.*成功/);
 });
 
 test("cardkit: live status timer reports elapsed seconds", async () => {

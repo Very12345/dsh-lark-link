@@ -484,6 +484,31 @@ test("adapter: activeSessionId persists across dsh restart and is resumed", asyn
 	assert.equal(second.agentId, first.sessionId, "same agent ID after restart");
 });
 
+test("adapter: assistant/message carries full reasoning and tool-step identity", async () => {
+	const registry = fakeRegistry();
+	const backend = mkBackend(ctxOf(registry, undefined));
+	const handle = await backend.ensureAgent("dm:tool-step");
+	const events: SessionEventOut[] = [];
+	handle.onEvent((event) => events.push(event));
+	const agent = registry.agents.get(handle.sessionId) as {
+		ctx: { emit(event: string, value: unknown): void };
+	};
+	agent.ctx.emit("session/event", {
+		type: "assistant/message",
+		data: { message: { content: [
+			{ type: "reasoning", text: "inspect first" },
+			{ type: "text", text: "I will inspect." },
+			{ type: "tool-call", id: "call-1", name: "read", arguments: "{}" },
+		] } },
+	});
+	const message = events.find((event) => event.type === "assistant/message") as
+		| Extract<SessionEventOut, { type: "assistant/message" }>
+		| undefined;
+	assert.equal(message?.text, "I will inspect.");
+	assert.equal(message?.reasoning, "inspect first");
+	assert.equal(message?.hasToolCalls, true);
+});
+
 test("adapter: reasoning deltas are forwarded separately from answer text", async () => {
 	const registry = fakeRegistry();
 	const backend = mkBackend(ctxOf(registry, undefined));
