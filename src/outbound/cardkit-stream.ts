@@ -77,6 +77,8 @@ export interface CardKitStreamHandle {
   reasoning(text: string, replace?: boolean): Promise<void>;
   /** Append one line to the collapsed tool-activity panel. */
   tool(text: string): Promise<void>;
+  /** Embed an uploaded Feishu image in the same live answer card. */
+  image(imageKey: string, alt?: string): Promise<void>;
   /** Append or replace answer text; the handle sends FULL accumulated text. */
   patch(text: string, replace?: boolean): Promise<void>;
   /** Finalize: disable streaming, PUT full content. Returns final card id. */
@@ -108,6 +110,7 @@ export function createCardKitStream(
   let acc = ""; // accumulated text — the API takes FULL text every push
   let reasoningAcc = "";
   let toolAcc = "";
+  const imagesAcc: Array<{ imageKey: string; alt: string }> = [];
   let statusText = "";
   let structureSignature = "";
   const now = opts.now ?? Date.now;
@@ -143,7 +146,7 @@ export function createCardKitStream(
       border: { color: "grey", corner_radius: "5px" },
       elements: [{ tag: "markdown", content, element_id: elementId }],
     });
-  const currentStructure = (): string => `${reasoningAcc ? "r" : ""}${toolAcc ? "t" : ""}`;
+  const currentStructure = (): string => `${reasoningAcc ? "r" : ""}${toolAcc ? "t" : ""}i${imagesAcc.length}`;
   const cardElements = (): unknown[] => {
     const elements: unknown[] = [
       { tag: "markdown", content: renderedStatus(), element_id: STATUS_ELEMENT_ID },
@@ -151,6 +154,13 @@ export function createCardKitStream(
     if (reasoningAcc) elements.push(panel("思考过程 · 成功", REASONING_ELEMENT_ID, reasoningCode()));
     if (toolAcc) elements.push(panel("工具调用", TOOL_ELEMENT_ID, toolAcc));
     elements.push({ tag: "markdown", content: acc || " ", element_id: STREAM_ELEMENT_ID });
+    for (const image of imagesAcc) elements.push({
+      tag: "img",
+      img_key: image.imageKey,
+      alt: { tag: "plain_text", content: image.alt || "生成图片" },
+      mode: "fit_horizontal",
+      preview: true,
+    });
     return elements;
   };
 
@@ -304,6 +314,11 @@ export function createCardKitStream(
       toolAcc += `${toolAcc ? "\n" : ""}${String(text || "").trim()}`;
       await syncStructure();
       await pushElement(TOOL_ELEMENT_ID, toolAcc);
+    },
+    async image(imageKey, alt = "生成图片") {
+      if (disposed || !imageKey) return;
+      imagesAcc.push({ imageKey: String(imageKey), alt: String(alt || "生成图片") });
+      await syncStructure();
     },
     async patch(text, replace = false) {
       if (disposed) return;

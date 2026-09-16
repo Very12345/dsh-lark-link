@@ -19,8 +19,8 @@ export type BridgeSessionEvent =
   | { type: "assistant/chunk"; text: string }
   | { type: "assistant/message"; text: string; reasoning?: string; hasToolCalls?: boolean }
   | { type: "turn/end"; reason: string; finalText?: string; error?: { message: string; code?: string } }
-  | { type: "tool/call"; name: string; callId?: string }
-  | { type: "tool/result"; name: string; callId?: string; error?: { name: string; code: string } }
+  | { type: "tool/call"; name: string; callId?: string; arguments?: string }
+  | { type: "tool/result"; name: string; callId?: string; output?: string; error?: { name?: string; code?: string; message?: string } }
   | { type: "todo/write"; todos: TodoItemState[] }
   | { type: "goal/change"; goal: GoalSnapshotState };
 
@@ -77,6 +77,34 @@ interface SessionState {
   finalText: string;
   delivered: boolean;
   toolNames: Map<string, string>;
+  reasoningRounds: number;
+  reasoningInStep: boolean;
+}
+
+function truncate(value: string, limit = 900): string {
+  const text = String(value || "").trim();
+  return text.length <= limit ? text : `${text.slice(0, limit)}\n…（已截断 ${text.length - limit} 字符）`;
+}
+
+function safeToolArguments(raw: string | undefined): string {
+  if (!raw) return "";
+  try {
+    const scrub = (value: unknown, key = ""): unknown => {
+      if (/secret|token|password|authorization|cookie|api[_-]?key/i.test(key)) return "[已脱敏]";
+      if (typeof value === "string") return value.length > 700 ? `${value.slice(0, 700)}…` : value;
+      if (Array.isArray(value)) return value.slice(0, 12).map((item) => scrub(item));
+      if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, scrub(v, k)]));
+      return value;
+    };
+    return truncate(JSON.stringify(scrub(JSON.parse(raw)), null, 2));
+  } catch {
+    return truncate(raw);
+  }
+}
+
+function fencedDetail(value: string, language = "text"): string {
+  const safe = truncate(value).replace(/```/g, "｀｀｀");
+  return safe ? "\n```" + language + "\n" + safe + "\n```" : "";
 }
 
 export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
@@ -92,6 +120,8 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
     finalText: "",
     delivered: false,
     toolNames: new Map(),
+    reasoningRounds: 0,
+    reasoningInStep: false,
   });
 
   const routeRefFor = (route: Route): RouteRef => ({
@@ -119,6 +149,8 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         st.finalText = "";
         st.delivered = false;
         st.toolNames.clear();
+        st.reasoningRounds = 0;
+        st.reasoningInStep = false;
         st.stream = undefined;
         st.stage = "thinking";
         if (deps.cfg().streamingEnabled) {
@@ -153,9 +185,12 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
       case "assistant/message": {
         const text = st.acc.length > event.text.length ? st.acc : event.text;
         st.acc = "";
-        if (event.reasoning && st.stream && !st.stream.disposed) {
-          await st.stream.reasoning(event.reasoning, true);
+        if (event.reasoning && st.stream && !st.stream.disposed && !st.reasoningInStep) {
+          const separator = st.reasoningRounds > 0 ? "\n\n---\n\n" : "";
+          st.reasoningRounds += 1;
+          await st.stream.reasoning(separator + event.reasoning);
         }
+        st.reasoningInStep = false;
         // A tool-use step also emits assistant/message. It is an intermediate
         // model step, not the end of the Agent turn: keep the card alive and
         // wait for tool/call → tool/result → the next model step.
@@ -254,7 +289,8 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         if (st.stream && !st.stream.disposed) {
           if (event.callId) st.toolNames.set(event.callId, event.name);
           st.stage = "tool";
-          await st.stream.tool(`▶️ 调用 \`${event.name || "unknown"}\``);
+          const args = safeToolArguments(event.arguments);
+          await st.stream.tool(`▶️ 调用 \`${event.name || "unknown"}\`${args ? fencedDetail(args, "json") : ""}`);
           await st.stream.status(`🛠️ **正在调用工具** · \`${event.name || "unknown"}\``);
         }
         break;
@@ -266,7 +302,14 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         if (st.stream && !st.stream.disposed) {
           st.stage = "thinking";
           await st.stream.status("🧠 **思考中**");
-          await st.stream.reasoning(event.text);
+          if (!st.reasoningInStep) {
+            const separator = st.reasoningRounds > 0 ? "\n\n---\n\n" : "";
+            st.reasoningRounds += 1;
+            st.reasoningInStep = true;
+            await st.stream.reasoning(separator + event.text);
+          } else {
+            await st.stream.reasoning(event.text);
+          }
         }
         break;
       }
@@ -279,9 +322,10 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
             || "unknown";
           if (event.callId) st.toolNames.delete(event.callId);
           st.stage = event.error ? "tool-error" : "thinking";
+          const resultDetail = event.error?.message || event.output || "";
           await st.stream.tool(event.error
-            ? `❌ \`${toolName}\` 失败${event.error.code ? ` · \`${event.error.code}\`` : ""}`
-            : `✅ \`${toolName}\` 成功`);
+            ? `❌ \`${toolName}\` 失败${event.error.code ? ` · \`${event.error.code}\`` : ""}${resultDetail ? fencedDetail(resultDetail) : ""}`
+            : `✅ \`${toolName}\` 成功${resultDetail ? fencedDetail(resultDetail) : ""}`);
           await st.stream.status(event.error
             ? `⚠️ **工具调用失败** · \`${toolName}\``
             : `✅ **工具调用成功** · \`${toolName}\``);

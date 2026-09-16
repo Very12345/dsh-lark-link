@@ -43,6 +43,7 @@ function makeForwarder(opts: { streaming?: boolean; failStream?: boolean; finali
     async tool(t: string) {
       streamTools.push(t);
     },
+    async image() {},
     async patch(t: string) {
       streamPatches.push(t);
     },
@@ -80,8 +81,10 @@ test("forwarder: one stream card tracks thinking, tools, output and completion",
   await fw.onSessionEvent("dm:ou_x", { type: "turn/start" });
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/reasoning", text: "先读取文件" });
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/message", text: "", reasoning: "先读取文件", hasToolCalls: true });
-  await fw.onSessionEvent("dm:ou_x", { type: "tool/call", name: "read", callId: "call-1" });
-  await fw.onSessionEvent("dm:ou_x", { type: "tool/result", name: "tool-result", callId: "call-1" });
+  await fw.onSessionEvent("dm:ou_x", { type: "tool/call", name: "read", callId: "call-1", arguments: '{"file_path":"package.json","api_token":"secret"}' });
+  await fw.onSessionEvent("dm:ou_x", { type: "tool/result", name: "tool-result", callId: "call-1", output: "package loaded" });
+  await fw.onSessionEvent("dm:ou_x", { type: "assistant/reasoning", text: "根据结果继续" });
+  await fw.onSessionEvent("dm:ou_x", { type: "assistant/message", text: "", reasoning: "根据结果继续", hasToolCalls: true });
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/chunk", text: "答案" });
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/message", text: "答案完成" });
   await fw.onSessionEvent("dm:ou_x", { type: "turn/end", reason: "completed" });
@@ -91,9 +94,12 @@ test("forwarder: one stream card tracks thinking, tools, output and completion",
   assert.ok(streamStatuses.some((status) => /工具调用成功/.test(status)));
   assert.ok(streamStatuses.some((status) => /正在生成回复/.test(status)));
   assert.match(streamStatuses.at(-1)!, /会话结束/);
-  assert.deepEqual(streamReasoning, ["先读取文件", "先读取文件"]);
+  assert.deepEqual(streamReasoning, ["先读取文件", "\n\n---\n\n根据结果继续"]);
   assert.ok(streamTools.some((line) => /调用.*read/.test(line)));
+  assert.ok(streamTools.some((line) => /file_path.*package\.json/s.test(line)));
+  assert.ok(streamTools.some((line) => /api_token.*已脱敏/s.test(line)));
   assert.ok(streamTools.some((line) => /read.*成功/.test(line)));
+  assert.ok(streamTools.some((line) => /package loaded/.test(line)));
   assert.deepEqual(streamPatches, ["答案", "答案完成", "答案完成"]);
   assert.deepEqual(finalized, ["答案完成"]);
   assert.equal(doneCount(), 1);
@@ -285,6 +291,7 @@ test("forwarder: stream handle disposed mid-turn falls through to outbox for fin
     async status() {},
     async reasoning() {},
     async tool() {},
+    async image() {},
     async patch() {},
     async finalize() {
       throw new Error("Stream handle was disposed");

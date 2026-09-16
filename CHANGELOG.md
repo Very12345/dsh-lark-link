@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4-webagent.17
+
+- Preserve every reasoning round in the live CardKit panel instead of replacing earlier rounds with the latest assistant step.
+- Show redacted, bounded tool arguments and result summaries in the collapsed tool panel.
+- Embed images sent by `lark_send_local_file` into the active answer card, with standalone-image fallback when no live card exists.
+
 ## 0.5.4-webagent.16
 
 ### Fix: phase success is not session termination

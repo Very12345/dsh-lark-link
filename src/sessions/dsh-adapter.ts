@@ -138,6 +138,16 @@ function reasoningOf(
 		.join("");
 }
 
+function nestedText(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (Array.isArray(value)) return value.map(nestedText).filter(Boolean).join("\n");
+	if (!value || typeof value !== "object") return "";
+	const row = value as Record<string, unknown>;
+	if (typeof row.text === "string") return row.text;
+	if (row.content !== undefined) return nestedText(row.content);
+	return "";
+}
+
 function toSessionEventOut(ev: SessionEvent): SessionEventOut | undefined {
 	const raw = ev as unknown as { type: string; data?: any };
 	switch (raw.type) {
@@ -162,12 +172,20 @@ function toSessionEventOut(ev: SessionEvent): SessionEventOut | undefined {
 		case "turn/end":
 			return { type: "turn/end", reason: raw.data?.reason?.kind ?? "done" };
 		case "tool/call":
-			return { type: "tool/call", name: raw.data?.name, callId: raw.data?.callId };
+			return {
+				type: "tool/call",
+				name: raw.data?.name,
+				callId: raw.data?.callId,
+				arguments: typeof raw.data?.arguments === "string"
+					? raw.data.arguments
+					: raw.data?.arguments === undefined ? undefined : JSON.stringify(raw.data.arguments),
+			};
 		case "tool/result":
 			return {
 				type: "tool/result",
 				name: raw.data?.message?.content?.[0]?.type ?? "?",
 				callId: raw.data?.message?.source?.callId,
+				output: nestedText(raw.data?.message?.content),
 				error: raw.data?.error,
 			};
 		case "todo/write": {

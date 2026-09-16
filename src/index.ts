@@ -2841,6 +2841,15 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 					);
 				}
 				if (!uploadKey) return "错误: 上传失败";
+				// When this tool is called inside an active Agent turn, keep generated
+				// imagery and the accompanying explanation in ONE CardKit message.
+				// Fall back to a standalone Feishu image outside a live card (or when
+				// CardKit is unavailable) so delivery remains reliable.
+				const liveCard = streamHandles.get(key);
+				if (isImage && liveCard && !liveCard.disposed) {
+					await liveCard.image(uploadKey, args.caption || fileName);
+					return `已嵌入当前回复卡片 ${args.path}`;
+				}
 				await sender.sendFile(
 					route.chatId,
 					uploadKey,

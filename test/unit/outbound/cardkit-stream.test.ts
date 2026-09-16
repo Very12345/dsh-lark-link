@@ -105,6 +105,8 @@ test("cardkit: status and answer share one live card", async () => {
   fakeNow += 10;
   await stream.tool("✅ `read` 成功");
   fakeNow += 10;
+  await stream.image("img_v3_generated", "生成预览");
+  fakeNow += 10;
   await stream.status("✅ **已完成**");
   await stream.finalize("最终答案");
 
@@ -112,7 +114,7 @@ test("cardkit: status and answer share one live card", async () => {
   assert.equal(calls.filter((call) => call.op === "deliver").length, 1, "one Feishu message per turn");
   const update = calls.filter((call) => call.op === "update").at(-1)!;
   const body = update.args[1] as { card: { data: string } };
-  const finalCard = JSON.parse(body.card.data) as { body: { elements: Array<{ tag: string; content?: string; element_id?: string; header?: { title?: { content?: string } }; elements?: Array<{ content: string; element_id?: string }> }> } };
+  const finalCard = JSON.parse(body.card.data) as { body: { elements: Array<{ tag: string; content?: string; element_id?: string; img_key?: string; header?: { title?: { content?: string } }; elements?: Array<{ content: string; element_id?: string }> }> } };
   assert.match(finalCard.body.elements.find((element) => element.element_id === STATUS_ELEMENT_ID)?.content ?? "", /已完成/);
   assert.match(finalCard.body.elements.find((element) => element.element_id === STREAM_ELEMENT_ID)?.content ?? "", /最终答案/);
   const reasoningPanel = finalCard.body.elements.find((element) => element.header?.title?.content?.startsWith("思考过程"));
@@ -123,6 +125,7 @@ test("cardkit: status and answer share one live card", async () => {
   const toolPanel = finalCard.body.elements.find((element) => element.header?.title?.content === "工具调用");
   assert.equal(toolPanel?.elements?.[0]?.element_id, TOOL_ELEMENT_ID);
   assert.match(toolPanel?.elements?.[0]?.content ?? "", /read.*成功/);
+  assert.equal(finalCard.body.elements.find((element) => element.tag === "img")?.img_key, "img_v3_generated");
 });
 
 test("cardkit: live status timer reports elapsed seconds", async () => {

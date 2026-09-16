@@ -34,8 +34,8 @@ export type SessionEventOut =
   | { type: "assistant/chunk"; text: string }
   | { type: "assistant/message"; text: string; reasoning?: string; hasToolCalls?: boolean }
   | { type: "turn/end"; reason: string; finalText?: string; error?: { message: string; code?: string } }
-  | { type: "tool/call"; name: string; callId?: string }
-  | { type: "tool/result"; name: string; callId?: string; error?: { name: string; code: string } }
+  | { type: "tool/call"; name: string; callId?: string; arguments?: string }
+  | { type: "tool/result"; name: string; callId?: string; output?: string; error?: { name?: string; code?: string; message?: string } }
   | { type: "todo/write"; todos: TodoItemState[] }
   | { type: "goal/change"; goal: GoalSnapshotState };
 
