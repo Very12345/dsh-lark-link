@@ -484,6 +484,22 @@ test("adapter: activeSessionId persists across dsh restart and is resumed", asyn
 	assert.equal(second.agentId, first.sessionId, "same agent ID after restart");
 });
 
+test("adapter: reasoning deltas are forwarded separately from answer text", async () => {
+	const registry = fakeRegistry();
+	const backend = mkBackend(ctxOf(registry, undefined));
+	const handle = await backend.ensureAgent("dm:reasoning");
+	const events: SessionEventOut[] = [];
+	handle.onEvent((event) => events.push(event));
+	const agent = registry.agents.get(handle.sessionId) as {
+		ctx: { emit(event: string, value: unknown): void };
+	};
+	agent.ctx.emit("session/event", {
+		type: "assistant/chunk",
+		data: { chunk: { type: "reasoning-delta", text: "inspect files" } },
+	});
+	assert.deepEqual(events, [{ type: "assistant/reasoning", text: "inspect files" }]);
+});
+
 test("adapter: resumed agent forwards events when the root session bus is silent", async () => {
 	const registry = fakeRegistry();
 	const ctx = ctxOf(registry, undefined) as unknown as {

@@ -27,6 +27,7 @@ function makeForwarder(opts: { streaming?: boolean; failStream?: boolean; finali
 
   const streamPatches: string[] = [];
   const streamStatuses: string[] = [];
+  const streamReasoning: string[] = [];
   const finalized: string[] = [];
   let doneCount = 0;
   const fakeStream: CardKitStreamHandle = {
@@ -34,6 +35,9 @@ function makeForwarder(opts: { streaming?: boolean; failStream?: boolean; finali
     disposed: false,
     async status(t: string) {
       streamStatuses.push(t);
+    },
+    async reasoning(t: string) {
+      streamReasoning.push(t);
     },
     async patch(t: string) {
       streamPatches.push(t);
@@ -64,12 +68,13 @@ function makeForwarder(opts: { streaming?: boolean; failStream?: boolean; finali
     cfg: () => ({ streamingEnabled: opts.streaming ?? true }),
   });
 
-  return { fw, outbox, sent, streamPatches, streamStatuses, finalized, doneCount: () => doneCount };
+  return { fw, outbox, sent, streamPatches, streamStatuses, streamReasoning, finalized, doneCount: () => doneCount };
 }
 
 test("forwarder: one stream card tracks thinking, tools, output and completion", async () => {
-  const { fw, streamStatuses, streamPatches, finalized, doneCount } = makeForwarder();
+  const { fw, streamStatuses, streamPatches, streamReasoning, finalized, doneCount } = makeForwarder();
   await fw.onSessionEvent("dm:ou_x", { type: "turn/start" });
+  await fw.onSessionEvent("dm:ou_x", { type: "assistant/reasoning", text: "先读取文件" });
   await fw.onSessionEvent("dm:ou_x", { type: "tool/call", name: "read" });
   await fw.onSessionEvent("dm:ou_x", { type: "tool/result", name: "read" });
   await fw.onSessionEvent("dm:ou_x", { type: "assistant/chunk", text: "答案" });
@@ -79,7 +84,8 @@ test("forwarder: one stream card tracks thinking, tools, output and completion",
   assert.ok(streamStatuses.some((status) => /正在调用工具.*read/.test(status)));
   assert.ok(streamStatuses.some((status) => /工具执行完成/.test(status)));
   assert.ok(streamStatuses.some((status) => /正在生成回复/.test(status)));
-  assert.match(streamStatuses.at(-1)!, /已完成/);
+  assert.match(streamStatuses.at(-1)!, /会话结束/);
+  assert.deepEqual(streamReasoning, ["先读取文件"]);
   assert.deepEqual(streamPatches, ["答案"]);
   assert.deepEqual(finalized, ["答案完成"]);
   assert.equal(doneCount(), 1);
@@ -93,7 +99,7 @@ test("forwarder: silent failure finalizes the same card with a diagnosis", async
     reason: "error",
     error: { code: "provider_tool_protocol_invalid", message: "missing file_path" },
   });
-  assert.match(streamStatuses.at(-1)!, /运行异常停止/);
+  assert.match(streamStatuses.at(-1)!, /会话异常结束/);
   assert.match(streamStatuses.at(-1)!, /missing file_path/);
   assert.deepEqual(finalized, [""]);
   assert.equal(doneCount(), 0);
@@ -264,6 +270,7 @@ test("forwarder: stream handle disposed mid-turn falls through to outbox for fin
     cardId: "",
     disposed: true, // e.g. createCard threw 400 on the first chunk
     async status() {},
+    async reasoning() {},
     async patch() {},
     async finalize() {
       throw new Error("Stream handle was disposed");

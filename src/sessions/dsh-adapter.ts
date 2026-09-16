@@ -138,6 +138,8 @@ function toSessionEventOut(ev: SessionEvent): SessionEventOut | undefined {
 			const c = raw.data?.chunk;
 			if (c?.type === "text-delta")
 				return { type: "assistant/chunk", text: c.text };
+			if (c?.type === "reasoning-delta")
+				return { type: "assistant/reasoning", text: c.text };
 			return undefined;
 		}
 		case "assistant/message":

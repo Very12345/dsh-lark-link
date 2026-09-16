@@ -15,6 +15,7 @@ import type { TaskCardSyncer } from "./task-card-syncer.ts";
 /** A normalized slice of the DSH session event surface we care about. */
 export type BridgeSessionEvent =
   | { type: "turn/start" }
+  | { type: "assistant/reasoning"; text: string }
   | { type: "assistant/chunk"; text: string }
   | { type: "assistant/message"; text: string }
   | { type: "turn/end"; reason: string; finalText?: string; error?: { message: string; code?: string } }
@@ -153,7 +154,7 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
           // the durable outbox so content is never lost.
           try {
             st.stage = "completed";
-            await st.stream.status("✅ **已完成**");
+            await st.stream.status("✅ **会话结束**");
             const finalId = await st.stream.finalize(text);
             if (!finalId) throw new Error("CardKit finalize returned empty cardId");
             st.stream = undefined;
@@ -193,7 +194,7 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
           if (st.stream && !st.stream.disposed) {
             try {
               st.stage = "completed";
-              await st.stream.status("✅ **已完成**");
+              await st.stream.status("✅ **会话结束**");
               await st.stream.finalize(rescue);
               st.stream = undefined;
               st.hasOutput = true;
@@ -222,8 +223,8 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
           const failed = ["rejected", "failed", "error"].includes(event.reason);
           const detail = event.error?.message?.trim();
           const status = failed
-            ? `❌ **运行异常停止，未产出回复**${detail ? `\n\n\`${detail.slice(0, 300)}\`` : ""}`
-            : "⚪ **本轮已结束，但没有文本输出**";
+            ? `❌ **会话异常结束，未产出回复**${detail ? `\n\n\`${detail.slice(0, 300)}\`` : ""}`
+            : "⚪ **会话结束，但没有文本输出**";
           const target = deps.streamFor(sessionKey);
           if (st.stream && !st.stream.disposed) {
             try {
@@ -258,6 +259,17 @@ export function createEventForwarder(deps: EventForwarderDeps): EventForwarder {
         if (st.stream && !st.stream.disposed) {
           st.stage = "tool";
           await st.stream.status(`🛠️ **正在调用工具** · \`${event.name || "unknown"}\``);
+        }
+        break;
+      }
+
+      case "assistant/reasoning": {
+        if (!deps.cfg().streamingEnabled) return;
+        if (!st.stream || st.stream.disposed) st.stream = deps.streamFor(sessionKey)?.ensureStream();
+        if (st.stream && !st.stream.disposed) {
+          st.stage = "thinking";
+          await st.stream.status("🧠 **思考中**");
+          await st.stream.reasoning(event.text);
         }
         break;
       }

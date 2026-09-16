@@ -63,6 +63,8 @@ export interface CardKitStreamOptions {
   printFrequencyMs?: number;
   /** print_step for the client typewriter (config at create time). */
   printStep?: number;
+  /** Live elapsed-time refresh interval. Set 0 to disable (tests). */
+  statusTickMs?: number;
   now?: () => number;
   onError?: (err: unknown) => void;
 }
@@ -71,6 +73,8 @@ export interface CardKitStreamHandle {
   cardId: string;
   /** Replace the live phase/status line without appending it to answer text. */
   status(text: string): Promise<void>;
+  /** Append a reasoning delta inside the collapsed reasoning panel. */
+  reasoning(text: string): Promise<void>;
   /** Append a text delta; the handle sends FULL accumulated text. */
   patch(text: string): Promise<void>;
   /** Finalize: disable streaming, PUT full content. Returns final card id. */
@@ -81,8 +85,10 @@ export interface CardKitStreamHandle {
 }
 
 const CARD_SCHEMA = "2.0";
-/** element_id of the single markdown element (1–20 chars per API rules). */
+/** element ids are 1–20 chars per CardKit rules. */
 const STREAM_ELEMENT_ID = "stream_md";
+const STATUS_ELEMENT_ID = "status_md";
+const REASONING_ELEMENT_ID = "reasoning_md";
 /** Safety valve: stop patching beyond this many API calls; finalize covers it. */
 const MAX_STREAM_PATCHES = 400;
 
@@ -91,15 +97,19 @@ export function createCardKitStream(
 ): CardKitStreamHandle {
   let cardId: string | undefined;
   let seq = 0; // strictly increasing across ALL ops on this card
-  let lastPatchAt = 0;
+  const lastPatchAt = new Map<string, number>();
   let patchCount = 0;
   let disposed = false;
   let inFlight = false;
   let backoffUntil = 0;
   let acc = ""; // accumulated text — the API takes FULL text every push
+  let reasoningAcc = "";
   let statusText = "";
   const now = opts.now ?? Date.now;
+  const startedAt = now();
   const minInterval = opts.minPushIntervalMs ?? opts.printFrequencyMs ?? 800;
+  const statusTickMs = opts.statusTickMs === undefined ? 1000 : Math.max(0, opts.statusTickMs);
+  let statusTimer: ReturnType<typeof setInterval> | undefined;
 
   const nextSeq = (): number => {
 
@@ -108,7 +118,32 @@ export function createCardKitStream(
   };
 
 
-  const cardJson = (text: string, streaming: boolean): string =>
+  const elapsedSeconds = (): number => Math.max(0, Math.floor((now() - startedAt) / 1000));
+  const renderedStatus = (): string => statusText
+    ? `${statusText} · **${elapsedSeconds()}s**`
+    : `🧠 **思考中** · **${elapsedSeconds()}s**`;
+  const reasoningCode = (): string => {
+    const safe = reasoningAcc.replace(/```/g, "｀｀｀").trim();
+    return safe ? `\`\`\`text\n${safe}\n\`\`\`` : "*等待模型返回可展示的思考内容…*";
+  };
+  const cardElements = (): unknown[] => [
+    { tag: "markdown", content: renderedStatus(), element_id: STATUS_ELEMENT_ID },
+    {
+      tag: "collapsible_panel",
+      expanded: false,
+      header: {
+        title: { tag: "plain_text", content: "思考过程" },
+        icon: { tag: "standard_icon", token: "down-small-ccm_outlined", size: "16px 16px" },
+        icon_position: "right",
+        icon_expanded_angle: -180,
+      },
+      border: { color: "grey", corner_radius: "5px" },
+      elements: [{ tag: "markdown", content: reasoningCode(), element_id: REASONING_ELEMENT_ID }],
+    },
+    { tag: "markdown", content: acc || " ", element_id: STREAM_ELEMENT_ID },
+  ];
+
+  const cardJson = (streaming: boolean): string =>
     JSON.stringify({
       schema: CARD_SCHEMA,
       config: {
@@ -127,55 +162,68 @@ export function createCardKitStream(
             }),
       },
       body: {
-        elements: [
-          { tag: "markdown", content: text || " ", element_id: STREAM_ELEMENT_ID },
-        ],
+        elements: cardElements(),
       },
     });
 
-  const createPayload = (text: string, streaming: boolean): unknown => ({
+  const createPayload = (streaming: boolean): unknown => ({
     // FLAT body per the official create doc: {type:"card_json", data:"<json>"}
     // — NOT wrapped under a `data` envelope (that shape 400s and the card
     // never appears).
     type: "card_json" as const,
-    data: cardJson(text, streaming),
+    data: cardJson(streaming),
   });
 
   const extractCardId = (
     res: { card_id?: string; data?: { card_id?: string } } | undefined,
   ): string | undefined => res?.card_id ?? res?.data?.card_id;
 
-  const rendered = (): string =>
-    [statusText.trim(), acc].filter((part) => part.trim() !== "").join("\n\n") || " ";
+  const startStatusTimer = (): void => {
+    if (statusTimer || statusTickMs <= 0) return;
+    statusTimer = setInterval(() => {
+      if (!disposed && cardId) void pushElement(STATUS_ELEMENT_ID, renderedStatus());
+    }, statusTickMs);
+    statusTimer.unref?.();
+  };
+  const stopStatusTimer = (): void => {
+    if (statusTimer) clearInterval(statusTimer);
+    statusTimer = undefined;
+  };
 
-  const push = async (): Promise<void> => {
+  const ensureCard = async (): Promise<void> => {
     if (disposed) return;
-    const content = rendered();
-    if (cardId === undefined) {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const created = await opts.api.createCard(createPayload(content, true));
-        cardId = extractCardId(created);
-        if (!cardId) throw new Error("CardKit create returned no card_id");
-        await opts.api.deliverCard(cardId);
-        patchCount++;
-        lastPatchAt = now();
-      } catch (err) {
-        opts.onError?.(err);
-        disposed = true;
-      } finally {
-        inFlight = false;
-      }
-      return;
+    if (cardId !== undefined || inFlight) return;
+    inFlight = true;
+    try {
+      const created = await opts.api.createCard(createPayload(true));
+      cardId = extractCardId(created);
+      if (!cardId) throw new Error("CardKit create returned no card_id");
+      await opts.api.deliverCard(cardId);
+      patchCount++;
+      const stamp = now();
+      lastPatchAt.set(STATUS_ELEMENT_ID, stamp);
+      lastPatchAt.set(REASONING_ELEMENT_ID, stamp);
+      lastPatchAt.set(STREAM_ELEMENT_ID, stamp);
+      startStatusTimer();
+    } catch (err) {
+      opts.onError?.(err);
+      disposed = true;
+      stopStatusTimer();
+    } finally {
+      inFlight = false;
     }
+  };
+
+  async function pushElement(elementId: string, content: string): Promise<void> {
+    await ensureCard();
+    if (!cardId || disposed) return;
     if (inFlight || patchCount >= MAX_STREAM_PATCHES) return;
     const currentTime = now();
-    if (currentTime < backoffUntil || currentTime - lastPatchAt < minInterval) return;
+    if (currentTime < backoffUntil || currentTime - (lastPatchAt.get(elementId) ?? 0) < minInterval) return;
     inFlight = true;
-    lastPatchAt = currentTime;
+    lastPatchAt.set(elementId, currentTime);
     try {
-      await opts.api.streamText(cardId, STREAM_ELEMENT_ID, {
+      await opts.api.streamText(cardId, elementId, {
         content,
         sequence: nextSeq(),
         uuid: randomUUID(),
@@ -190,7 +238,7 @@ export function createCardKitStream(
     } finally {
       inFlight = false;
     }
-  };
+  }
 
   return {
     // Live getters — the closure fields mutate after creation (never snapshot).
@@ -202,18 +250,27 @@ export function createCardKitStream(
     },
     async status(text) {
       statusText = String(text || "").trim();
-      await push();
+      await ensureCard();
+      await pushElement(STATUS_ELEMENT_ID, renderedStatus());
+    },
+    async reasoning(text) {
+      if (disposed) return;
+      reasoningAcc += String(text || "");
+      await ensureCard();
+      await pushElement(REASONING_ELEMENT_ID, reasoningCode());
     },
     async patch(text) {
       if (disposed) return;
       acc += text;
-      await push();
+      await ensureCard();
+      await pushElement(STREAM_ELEMENT_ID, acc || " ");
     },
     async finalize(fullText) {
       if (disposed) {
         if (!cardId) throw new Error("CardKit stream handle was disposed (creation failed)");
         return cardId;
       }
+      stopStatusTimer();
       // Wait for any inFlight network patch to settle before finalizing
       let waitCount = 0;
       while (inFlight && waitCount < 20) {
@@ -222,13 +279,12 @@ export function createCardKitStream(
       }
 
       if (fullText) acc = fullText;
-      const text = rendered();
       if (!cardId) {
         // Never streamed a chunk — create a plain (non-streaming) card with
         // the full content and deliver it. Failure PROPAGATES so the caller
         // falls back to the durable outbox (content must not be lost).
         try {
-          const created = await opts.api.createCard(createPayload(text || " ", false));
+          const created = await opts.api.createCard(createPayload(false));
           cardId = extractCardId(created);
           if (!cardId) throw new Error("CardKit create returned no card_id");
           await opts.api.deliverCard(cardId);
@@ -254,7 +310,7 @@ export function createCardKitStream(
       // 2) PUT the full content — the durable delivery. Failure propagates.
       try {
         await opts.api.updateCard(id, {
-          card: { type: "card_json", data: cardJson(text || " ", false) },
+          card: { type: "card_json", data: cardJson(false) },
           sequence: nextSeq(),
           uuid: randomUUID(),
         });
@@ -265,7 +321,7 @@ export function createCardKitStream(
           await new Promise((r) => setTimeout(r, 600));
           try {
             await opts.api.updateCard(id, {
-              card: { type: "card_json", data: cardJson(text || " ", false) },
+              card: { type: "card_json", data: cardJson(false) },
               sequence: nextSeq(),
               uuid: randomUUID(),
             });
@@ -288,4 +344,4 @@ export function createCardKitStream(
 
 }
 
-export { CARD_SCHEMA, STREAM_ELEMENT_ID };
+export { CARD_SCHEMA, STREAM_ELEMENT_ID, STATUS_ELEMENT_ID, REASONING_ELEMENT_ID };

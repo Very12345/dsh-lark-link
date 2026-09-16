@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createCardKitStream, CARD_SCHEMA, STREAM_ELEMENT_ID } from "../../../src/outbound/cardkit-stream.ts";
+import { createCardKitStream, CARD_SCHEMA, STREAM_ELEMENT_ID, STATUS_ELEMENT_ID, REASONING_ELEMENT_ID } from "../../../src/outbound/cardkit-stream.ts";
 
 /**
  * Real CardKit v1 API shapes (official docs, verified 2026-08):
@@ -75,9 +75,10 @@ test("cardkit: first patch creates a streaming card entity and delivers it", asy
   assert.equal(config.update_multi, true, "card created with update_multi true");
   assert.equal(config.streaming_config.print_frequency_ms.default, 1);
   assert.equal(config.streaming_config.print_step.default, 3);
-  const elements = (card.body as { elements: Array<{ tag: string; element_id: string }> }).elements;
-  assert.equal(elements[0]!.tag, "markdown");
-  assert.equal(elements[0]!.element_id, STREAM_ELEMENT_ID);
+  const elements = (card.body as { elements: Array<{ tag: string; element_id?: string }> }).elements;
+  assert.equal(elements.find((element) => element.element_id === STREAM_ELEMENT_ID)?.tag, "markdown");
+  assert.equal(elements.find((element) => element.element_id === STATUS_ELEMENT_ID)?.tag, "markdown");
+  assert.equal(elements.some((element) => element.tag === "collapsible_panel"), true);
 
   // The card entity must be DELIVERED into the chat (im message with card_id) —
   // creating the entity alone shows nothing to the user.
@@ -88,14 +89,18 @@ test("cardkit: first patch creates a streaming card entity and delivers it", asy
 test("cardkit: status and answer share one live card", async () => {
   const { api, calls } = fakeApi();
   let fakeNow = 0;
-  const stream = createCardKitStream({ api, minPushIntervalMs: 1, now: () => fakeNow });
+  const stream = createCardKitStream({ api, minPushIntervalMs: 1, statusTickMs: 0, now: () => fakeNow });
   await stream.status("🧠 **思考中…**");
-  const firstCard = createPayloadOf(calls) as { body: { elements: Array<{ content: string }> } };
-  assert.match(firstCard.body.elements[0]!.content, /思考中/);
+  const firstCard = createPayloadOf(calls) as { body: { elements: Array<{ tag: string; content?: string; element_id?: string; elements?: Array<{ element_id?: string }> }> } };
+  assert.match(firstCard.body.elements.find((element) => element.element_id === STATUS_ELEMENT_ID)?.content ?? "", /思考中/);
+  const panel = firstCard.body.elements.find((element) => element.tag === "collapsible_panel");
+  assert.equal(panel?.elements?.[0]?.element_id, REASONING_ELEMENT_ID);
   fakeNow += 10;
   await stream.status("🛠️ **正在调用工具** · `read`");
   fakeNow += 10;
   await stream.patch("正在分析");
+  fakeNow += 10;
+  await stream.reasoning("先读取文件，再核对图片。");
   fakeNow += 10;
   await stream.status("✅ **已完成**");
   await stream.finalize("最终答案");
@@ -104,9 +109,27 @@ test("cardkit: status and answer share one live card", async () => {
   assert.equal(calls.filter((call) => call.op === "deliver").length, 1, "one Feishu message per turn");
   const update = calls.find((call) => call.op === "update")!;
   const body = update.args[1] as { card: { data: string } };
-  const finalCard = JSON.parse(body.card.data) as { body: { elements: Array<{ content: string }> } };
-  assert.match(finalCard.body.elements[0]!.content, /已完成/);
-  assert.match(finalCard.body.elements[0]!.content, /最终答案/);
+  const finalCard = JSON.parse(body.card.data) as { body: { elements: Array<{ tag: string; content?: string; element_id?: string; elements?: Array<{ content: string }> }> } };
+  assert.match(finalCard.body.elements.find((element) => element.element_id === STATUS_ELEMENT_ID)?.content ?? "", /已完成/);
+  assert.match(finalCard.body.elements.find((element) => element.element_id === STREAM_ELEMENT_ID)?.content ?? "", /最终答案/);
+  const reasoning = finalCard.body.elements.find((element) => element.tag === "collapsible_panel")?.elements?.[0]?.content ?? "";
+  assert.match(reasoning, /^```text/);
+  assert.match(reasoning, /先读取文件/);
+});
+
+test("cardkit: live status timer reports elapsed seconds", async () => {
+  const { api, calls } = fakeApi();
+  let fakeNow = 0;
+  const stream = createCardKitStream({ api, minPushIntervalMs: 1, statusTickMs: 5, now: () => fakeNow });
+  await stream.status("🧠 **思考中**");
+  fakeNow = 2_100;
+  await new Promise((resolve) => setTimeout(resolve, 18));
+  const statusUpdates = calls
+    .filter((call) => call.op === "streamText" && call.args[1] === STATUS_ELEMENT_ID)
+    .map((call) => (call.args[2] as { content: string }).content);
+  assert.ok(statusUpdates.some((content) => /2s/.test(content)), "timer pushed elapsed seconds");
+  await stream.status("✅ **会话结束**");
+  await stream.finalize("done");
 });
 
 test("cardkit: streamText sends FULL accumulated text with strictly increasing sequence", async () => {
@@ -147,8 +170,8 @@ test("cardkit: finalize disables streaming then PUTs the full card", async () =>
   const update = calls.find((c) => c.op === "update")!;
   const updateBody = update.args[1] as { card: { type: string; data: string } };
   assert.equal(updateBody.card.type, "card_json");
-  const finalCard = JSON.parse(updateBody.card.data) as { body: { elements: Array<{ tag: string; content: string }> } };
-  assert.equal(finalCard.body.elements[0]!.content, "full text");
+  const finalCard = JSON.parse(updateBody.card.data) as { body: { elements: Array<{ element_id?: string; content?: string }> } };
+  assert.equal(finalCard.body.elements.find((element) => element.element_id === STREAM_ELEMENT_ID)?.content, "full text");
   assert.equal(update.args[0], cardId);
   assert.equal(stream.disposed, true);
 });
@@ -288,7 +311,7 @@ test("cardkit: finalize with NO prior patches creates a non-streaming card, deli
   const card = createPayloadOf(calls);
   const config = card.config as { streaming_mode?: boolean } | undefined;
   assert.notEqual(config?.streaming_mode, true, "no streaming mode on a finalized-only card");
-  const elements = (card.body as { elements: Array<{ content: string }> }).elements;
-  assert.equal(elements[0]!.content, "done text");
+  const elements = (card.body as { elements: Array<{ element_id?: string; content?: string }> }).elements;
+  assert.equal(elements.find((element) => element.element_id === STREAM_ELEMENT_ID)?.content, "done text");
   assert.equal(calls.find((c) => c.op === "deliver")?.args[0], id);
 });

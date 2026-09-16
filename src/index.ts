@@ -2234,6 +2234,9 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			if (event.type === "assistant/chunk") {
 				if ((event.text ?? "").trim() !== "") turnSupervisor.arm(key);
 			}
+			if (event.type === "assistant/reasoning") {
+				if ((event.text ?? "").trim() !== "") turnSupervisor.arm(key);
+			}
 			if (event.type === "tool/call" || event.type === "tool/result") {
 				turnSupervisor.arm(key); // tools run long legitimately — extend
 			}

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.4-webagent.15
+
+### Feature: elapsed time and folded reasoning
+- Stream real DSH `reasoning-delta` content into a collapsed CardKit 2.0 `collapsible_panel` code block, separate from answer text.
+- Refresh the live phase line once per second with elapsed time and freeze the total duration in the explicit success, empty, or failure terminal state.
+- The status, reasoning panel and answer are independent card elements but remain inside one delivered message and one strictly ordered CardKit sequence.
+
 ## 0.5.4-webagent.14
 
 ### Feature: one-card live Agent state
