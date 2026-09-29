@@ -1,0 +1,6 @@
+# dist/ is committed so that git-hosted installs work without build scripts,
+# which pnpm blocks for git dependencies by default. Mark it generated so
+# GitHub collapses it in diffs, reviews, and the language bar.
+dist/** linguist-generated=true
+dist/index.js -diff
+dist/client.js -diff

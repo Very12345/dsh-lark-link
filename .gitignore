@@ -1,8 +1,15 @@
 # dependencies
 node_modules/
 
-# build output (published via npm "files", not committed)
-dist/
+# Build output IS committed on purpose.
+#
+# pnpm refuses to run build scripts of git-hosted dependencies by default
+# (ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED, a supply-chain guard). A git install
+# therefore never runs `prepack`, so unless dist/ is in the repository the
+# install fails or produces a package with no entry point.
+#
+# Committing dist/ makes `pnpm add <git-url>` work out of the box. Regenerate it
+# with `npm run build` whenever src/ changes. See also .gitattributes.
 
 # packaged tarballs
 *.tgz
