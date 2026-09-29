@@ -6,6 +6,7 @@
 // No blocked commands, no admin gates (user decision: 无审批, 全放开).
 
 import type { FeishuInboundMessage } from "../common/types.ts";
+import { resolveReactions } from "../common/reactions.ts";
 import type { BridgeContextRead } from "./bridge-context.ts";
 
 export interface DshCommandRegistry {
@@ -27,6 +28,10 @@ export interface CommandRouterDeps {
 		rawInput: string,
 		msg: FeishuInboundMessage,
 	): Promise<boolean>;
+	commandProgress?: {
+		start(chatId: string, id: string, command: string): Promise<boolean>;
+		cancel(chatId: string, id: string): Promise<void>;
+	};
 }
 
 export interface CommandRouter {
@@ -57,8 +62,23 @@ const BRIDGE_COMMANDS = new Set([
 	// Feishu-side history picker — Tier 1 wins over DSH's own /resume so the
 	// workspace-session card renders instead of a bare text reply.
 	"resume",
+	// 对话管理 (rename / delete / migrate project). `/sessions` stays an alias:
+	// it used to be the plain listing and now opens this panel.
+	"manage",
+	// 任务列表：运行中优先、切换任务（替代 /resume 的会话选择器）。
+	"tasks",
 	// Feishu-side goal controller — Tier 1 renders interactive goal deck / templates.
 	"goal",
+	// Control panel + observability shortcuts (no typing needed once opened).
+	"menu",
+	// Card-driven config toggles (op form `cfg:<key>=<value>`).
+	"cfg",
+	"stream",
+	"reconnect",
+	"cwd",
+	"whoami",
+	"usage",
+	"files",
 ]);
 
 
@@ -92,7 +112,10 @@ export function createCommandRouter(deps: CommandRouterDeps): CommandRouter {
 			const cmdName = head.replace(/^\/+/, "").toLowerCase();
 			const rawInput = tokens.slice(1).join(" ");
 			if (BRIDGE_COMMANDS.has(cmdName) || cmdName === "lark") {
+				const progressId = `bridge:${cmdName}:${msg.messageId}`;
+				await deps.commandProgress?.start(msg.chatId, progressId, cmdName);
 				const handled = await deps.bridgeHandler(cmdName, rawInput, msg);
+				if (!handled) await deps.commandProgress?.cancel(msg.chatId, progressId);
 				if (handled) {
 					// Command replies get the DONE receipt too (pi design:
 					// 任务完成 → 对触发消息打 DONE)，so /help /status confirm
@@ -100,7 +123,7 @@ export function createCommandRouter(deps: CommandRouterDeps): CommandRouter {
 					const cfg = deps.ctx.cfg();
 					if (cfg.reactions.enabled) {
 						void deps.ctx.sender
-							?.addReaction(msg.messageId, cfg.reactions.done || "DONE")
+							?.addReaction(msg.messageId, resolveReactions(cfg.reactions).done)
 							.catch(() => undefined);
 					}
 				}
@@ -122,6 +145,8 @@ export function createCommandRouter(deps: CommandRouterDeps): CommandRouter {
 			}
 			const agentId = agent?.agentId ?? "";
 			if (agentId && deps.commands.has(cmdName, agentId)) {
+				const progressId = `${key2}:cmd:${cmdName}:${msg.messageId}`;
+				await deps.commandProgress?.start(msg.chatId, progressId, cmdName);
 				try {
 					const result = await deps.commands.run(cmdName, rawInput, agentId);
 					const key = deps.ctx.conversationKeyFor(msg);
@@ -152,6 +177,7 @@ export function createCommandRouter(deps: CommandRouterDeps): CommandRouter {
 					}
 					return "dsh";
 				} catch {
+					await deps.commandProgress?.cancel(msg.chatId, progressId);
 					return "agent"; // handler failed — fall through to the agent
 				}
 			}

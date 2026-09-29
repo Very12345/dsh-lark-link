@@ -205,6 +205,31 @@ test("manager: /new then a message still gets a reply (stale hook dropped)", asy
 	await cm.disposeAll();
 });
 
+test("manager: /resume immediately rebinds events to the resumed agent", async () => {
+	const backend = createMemoryDshBackend({ autoReply: () => "after-resume" });
+	const events: string[] = [];
+	const cm = createConversationManager({
+		backend,
+		maxSessions: 8,
+		idleTtlMs: 60_000,
+		onEvent: (key, event) => events.push(`${key}:${event.type}`),
+	});
+
+	await cm.handleMessage(mkMsg("ou_resume", "p2p", "before"));
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	await cm.resume("dm:ou_resume", "historical-session");
+	events.length = 0;
+	await cm.handleMessage(mkMsg("ou_resume", "p2p", "continue history"));
+	await new Promise((resolve) => setTimeout(resolve, 60));
+
+	assert.equal(backend.get("dm:ou_resume")?.sessionId, "historical-session");
+	assert.ok(
+		events.includes("dm:ou_resume:assistant/message"),
+		"resumed agent events reach the bridge on the first followup",
+	);
+	await cm.disposeAll();
+});
+
 test("manager: idle sweep then message still gets reply (stale hook after disposal)", async () => {
 	const backend = createMemoryDshBackend({ autoReply: () => "reply-after-sweep" });
 	const events: string[] = [];

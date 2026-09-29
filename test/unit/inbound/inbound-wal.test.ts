@@ -45,6 +45,21 @@ test("delivered marks the record and excludes it from replay", () => {
   assert.equal(wal.pendingReplays().length, 0);
 });
 
+test("FIFO settlement is not confused by a newer queued message", () => {
+  let t = 100;
+  const dir = tmpdir();
+  const wal = createInboundWal({ dir, now: () => t });
+  wal.accept(base("first"));
+  t += 1;
+  wal.accept(base("second"));
+
+  assert.equal(wal.deliveredOldest("dm:oc_x")?.messageId, "first");
+  assert.deepEqual(wal.pendingReplays().map((r) => r.messageId), ["second"]);
+  assert.equal(wal.failOldest("dm:oc_x")?.messageId, "second");
+  assert.equal(wal.pendingReplays().length, 0);
+  assert.equal(wal.failedCount(), 1);
+});
+
 test("markReplay bumps attempts; over-cap requests stop replaying", () => {
   const dir = tmpdir();
   const wal = createInboundWal({ dir, maxReplayAttempts: 2 });
@@ -67,6 +82,18 @@ test("old accepted records are excluded from replay after retention", () => {
   t += 20_000; // age past the window
   assert.equal(wal.pendingReplays().length, 0);
   assert.equal(wal.markReplay("old1"), false);
+});
+
+test("prune terminalizes expired accepted records so they cannot steal a new FIFO delivery", () => {
+  let t = 1_000_000;
+  const dir = tmpdir();
+  const wal = createInboundWal({ dir, replayRetentionMs: 10_000, now: () => t });
+  wal.accept(base("stale"));
+  t += 20_000;
+  wal.prune();
+  assert.equal(wal.failedCount(), 1);
+  wal.accept(base("fresh"));
+  assert.equal(wal.deliveredOldest("dm:oc_x")?.messageId, "fresh");
 });
 
 test("prune removes delivered records and dead never-delivered ones", () => {

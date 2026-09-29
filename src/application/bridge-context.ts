@@ -6,6 +6,7 @@
 // the context around.
 
 import type { FeishuConfig, ConfigStore } from "../common/config.ts";
+import { resolveReactions } from "../common/reactions.ts";
 import type { Logger } from "../common/logger.ts";
 import type { StatusStore } from "../common/connection-status.ts";
 import type { ConversationManager } from "../sessions/conversation-manager.ts";
@@ -81,6 +82,8 @@ export interface BridgeContextRead {
   conversationKeyFor(msg: FeishuInboundMessage): string;
   routeFor(key: string): Route | undefined;
   markDone(key: string, triggerMessageId?: string): Promise<void>;
+  /** Failure receipt (ERROR reaction) — wired like markDone. */
+  markError(key: string, triggerMessageId?: string): Promise<void>;
 }
 
 /** Write-side surface used by the host (index.ts). */
@@ -175,13 +178,25 @@ export function createBridgeContext(deps: BridgeContextDeps): BridgeContext {
     },
     async markDone(key, triggerMessageId) {
       if (!triggerMessageId || !deps.sender) return;
-      const doneEmoji = deps.cfg().reactions.done || "DONE";
+      const doneEmoji = resolveReactions(deps.cfg().reactions).done;
       deps.logger.info(`markDone: ${key} -> ${triggerMessageId} (${doneEmoji})`);
       try {
         await deps.sender.addReaction(triggerMessageId, doneEmoji);
       } catch (err) {
         deps.logger.warn(
           `markDone reaction failed for ${key}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    },
+    async markError(key, triggerMessageId) {
+      if (!triggerMessageId || !deps.sender) return;
+      const errorEmoji = resolveReactions(deps.cfg().reactions).error;
+      deps.logger.info(`markError: ${key} -> ${triggerMessageId} (${errorEmoji})`);
+      try {
+        await deps.sender.addReaction(triggerMessageId, errorEmoji);
+      } catch (err) {
+        deps.logger.warn(
+          `markError reaction failed for ${key}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     },

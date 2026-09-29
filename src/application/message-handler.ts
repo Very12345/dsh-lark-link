@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { FeishuInboundMessage } from "../common/types.ts";
 import type { BridgeContextRead } from "./bridge-context.ts";
 import type { CommandRouter } from "./command-router.ts";
-import { createReactionPicker } from "../common/reactions.ts";
+import { resolveReactions } from "../common/reactions.ts";
 import type { AttachmentInput } from "../sessions/dsh-session-backend.ts";
 import type { InboundWal } from "../inbound/inbound-wal.ts";
 
@@ -322,17 +322,13 @@ export function createMessageHandler(deps: MessageHandlerDeps): MessageHandler {
 				deps.ctx.conversations?.keyFor(msg) ?? `${msg.chatType}:${msg.chatId}`,
 				msg,
 			);
-		// 4. reaction receipt (random pool, never DONE) — picker built from live cfg
-		const reactions = deps.ctx.cfg().reactions;
-		if (reactions.enabled) {
-			const picker = createReactionPicker(reactions.pool, reactions.done);
-			const pick = picker.pickRandom();
-			if (pick) {
-				try {
-					await deps.ctx.sender?.addReaction(msg.messageId, pick);
-				} catch {
-					logger.warn(`receipt reaction failed for ${msg.messageId}`);
-				}
+		// 4. reaction receipt — fixed and meaningful (OnIt = 收到即办), live cfg
+		const reactions = resolveReactions(deps.ctx.cfg().reactions);
+		if (deps.ctx.cfg().reactions.enabled && reactions.receipt) {
+			try {
+				await deps.ctx.sender?.addReaction(msg.messageId, reactions.receipt);
+			} catch {
+				logger.warn(`receipt reaction failed for ${msg.messageId}`);
 			}
 		}
 		// 5. command routing (bridge / dsh / agent)

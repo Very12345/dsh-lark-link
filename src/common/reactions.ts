@@ -1,9 +1,9 @@
-// Reaction receipts: random reaction on inbound (pool excludes the DONE
-// marker), DONE only on task completion. Contains ONLY Feishu-valid emoji
-// types — the set below is the authoritative scrape of the Feishu reaction
-// emoji_type catalog (pi-feishu-link 2026-08-13, verified live). Case
-// sensitive: Fire is valid, FIRE is not; invalid types make addReaction
-// fail with 231001 "reaction type is invalid".
+// Reaction receipts are a fixed STATE MACHINE, not decoration: inbound gets
+// OnIt (收到，这就去办), a completed turn gets DONE, a failed turn gets ERROR.
+// Every value must be a Feishu-valid emoji_type from the official reaction
+// catalog (emojis-introduce, authoritative scrape verified live) — the API
+// rejects anything else with 231001, and tenant custom emojis are not
+// supported. Case sensitive: Fire is valid, FIRE is not.
 // Harness-agnostic pure module.
 
 /** All Feishu-valid emoji_type values (open.feishu.cn …/emojis-introduce). */
@@ -188,55 +188,61 @@ export const VALID_EMOJI_TYPES: ReadonlySet<string> = new Set([
 	"Shrug",
 	"ClownFace",
 	"HappyDragon",
+	// The ONLY two values in the official catalog that start with a digit —
+	// easy to overlook, and a configured pool using them used to be silently
+	// dropped by the allow-list filter below.
+	"2022",
+	"18X",
 ]);
 
-/** Completion marker — never part of the random pool. */
+/**
+ * Completion marker. Deliberately NOT used as the inbound receipt: the two
+ * reactions mean different things (see {@link ReactionSet}).
+ */
 export const DONE_EMOJI = "DONE";
 
-/**
- * Default random receipt pool (all Feishu-valid). 2026-08-08 pi fix:
- * FIRE → Fire (case-sensitive); ROCKET/SUN/WHITE_CHECK_MARK are NOT valid
- * Feishu emoji_type values and cause addReaction 231001.
- */
-export const DEFAULT_RANDOM_POOL: readonly string[] = [
-	"THUMBSUP",
-	"OK",
-	"HEART",
-	"LAUGH",
-	"SMILE",
-	"WOW",
-	"CLAP",
-	"Fire",
-];
-
-export interface ReactionPicker {
-	/** Random receipt reaction — never the DONE marker. */
-	pickRandom(): string | undefined;
-	/** Completion marker reaction. */
-	done(): string;
+/** The three states a turn can be in, each mapped to ONE fixed reaction. */
+export interface ReactionSet {
+	/** Inbound receipt — "got it, working on it". */
+	receipt: string;
+	/** Turn / command completed successfully. */
+	done: string;
+	/** Turn failed before completing. */
+	error: string;
 }
 
 /**
- * Build a reaction picker from a configured pool. Filters out any type not in
- * VALID_EMOJI_TYPES (fail-safe: a stale config cannot 400 the bridge) AND the
- * DONE marker (completion marker never participates in the random pool);
- * falls back to the default pool when nothing valid remains.
+ * Fixed, state-mapped reactions — chosen for MEANING, not decoration:
+ * `OnIt` = 收到，这就去办 · `DONE` = 完成 ✅ · `ERROR` = 失败 ❌.
+ * Reactions can only use Feishu's BUILT-IN emoji catalog: the reaction API
+ * rejects anything else with 231001 (tenant custom emojis are not supported),
+ * so every value is validated against {@link VALID_EMOJI_TYPES}.
  */
-export function createReactionPicker(
-	pool: readonly string[],
-	done: string,
-): ReactionPicker {
-	const validPool = pool.filter((t) => VALID_EMOJI_TYPES.has(t) && t !== done);
-	const effectivePool =
-		validPool.length > 0
-			? validPool
-			: DEFAULT_RANDOM_POOL.filter((t) => t !== done);
-	const effectiveDone = VALID_EMOJI_TYPES.has(done) ? done : DONE_EMOJI;
+export const DEFAULT_REACTIONS: ReactionSet = {
+	receipt: "OnIt",
+	done: DONE_EMOJI,
+	error: "ERROR",
+};
+
+/**
+ * Resolve the configured reactions into a usable set. Each field is normalized
+ * (trim; strip stray brackets/quotes a text config assignment may leave) and
+ * falls back to its default when it is not a valid catalog entry. Deterministic
+ * by design — the same config always renders the same reaction, unlike the
+ * random pool this replaces: the reaction is a STATEMENT about the turn.
+ */
+export function resolveReactions(
+	configured?: Partial<ReactionSet>,
+): ReactionSet {
+	const pick = (value: string | undefined, fallback: string): string => {
+		const cleaned = String(value ?? "")
+			.replace(/[[\]"']/g, "")
+			.trim();
+		return cleaned !== "" && VALID_EMOJI_TYPES.has(cleaned) ? cleaned : fallback;
+	};
 	return {
-		pickRandom() {
-			if (effectivePool.length === 0) return undefined;
-			return effectivePool[Math.floor(Math.random() * effectivePool.length)];
-		},
-		done: () => effectiveDone,
+		receipt: pick(configured?.receipt, DEFAULT_REACTIONS.receipt),
+		done: pick(configured?.done, DEFAULT_REACTIONS.done),
+		error: pick(configured?.error, DEFAULT_REACTIONS.error),
 	};
 }

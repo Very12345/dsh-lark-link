@@ -15,8 +15,34 @@ import { createDshAdapter } from "./sessions/dsh-adapter.ts";
 import { createMemoryDshBackend } from "./sessions/dsh-session-backend.ts";
 import { createConversationManager } from "./sessions/conversation-manager.ts";
 import { createConversationConfigStore } from "./sessions/conversation-config.ts";
-import { listWorkspaceSessions, extractTitleFromEvents } from "./sessions/workspace-sessions.ts";
+import {
+	listWorkspaceSessions,
+	extractTitleFromEvents,
+	resolveSessionsRoot,
+	type WorkspaceSessionInfo,
+} from "./sessions/workspace-sessions.ts";
+
+import {
+	deleteSession,
+	listProjectCwds,
+	moveSessionToProject,
+	type SessionAdminDeps,
+} from "./sessions/session-admin.ts";
+import { createSessionAliasStore } from "./sessions/session-aliases.ts";
 import { createTurnSupervisor } from "./sessions/turn-supervisor.ts";
+import {
+	createTaskRegistry,
+	conversationKeyForSessionId,
+	conversationKeyOf,
+	type TaskRecord,
+} from "./sessions/task-registry.ts";
+import {
+	ensureWorkspaceDir,
+	isInsideWorkspace,
+	resolveIsolatedWorkspace,
+	userWorkspaceRoot,
+} from "./common/user-workspace.ts";
+import { formValuesOf } from "./application/card-action.ts";
 import { createOutbox, type OutboxSender } from "./outbound/outbox.ts";
 import { createEventForwarder } from "./outbound/event-forwarder.ts";
 import {
@@ -65,6 +91,14 @@ import { createReplaySalvage } from "./inbound/replay-salvage.ts";
 import { createQuotaGovernor } from "./common/quota-governor.ts";
 import {
 	helpCard,
+	commandPanelCard,
+	statusCard,
+	newConfirmCard,
+	stopResultCard,
+	configPanelCard,
+	larkAdminPanelCard,
+	workspaceBrowserCard,
+	workspaceNewFolderCard,
 	markdownCard,
 	looksLikeMarkdown,
 	modeCard,
@@ -73,6 +107,15 @@ import {
 	permissionCard,
 	questionCard,
 	resumeCard,
+	sessionManageCard,
+	sessionManageDetailCard,
+	sessionRenameCard,
+	sessionMoveCard,
+	sessionDeleteConfirmCard,
+	taskListCard,
+	taskBriefingCard,
+	type TaskRow,
+	type ManageableSession,
 	withButtons,
 	button,
 	AGENT_PRESETS,
@@ -82,9 +125,12 @@ import {
 	buildGoalSetupCard,
 	buildPlanReviewCard,
 	buildSessionResumedCard,
+	sitePreviewCard,
 } from "./presentation/cards.ts";
+import { createSitePreviewManager } from "./preview/site-preview-manager.ts";
 import type { GoalSnapshotState, TodoItemState } from "./common/types.ts";
 import { createTaskCardSyncer, type TaskCardSyncer } from "./outbound/task-card-syncer.ts";
+import { createCommandPanelSync, type CommandPanelSync } from "./outbound/command-panel-sync.ts";
 
 
 
@@ -102,7 +148,15 @@ import * as qrcode from "qrcode-terminal";
 import QRCode from "qrcode";
 import { homedir, hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveWorkspaceTarget, resolveInWorkspacePath, isAbsoluteAny } from "./common/paths.ts";
+import {
+	resolveWorkspaceTarget,
+	resolveInWorkspacePath,
+	isAbsoluteAny,
+	parentDirectory,
+	sanitizeDirectoryName,
+	decodeOpPath,
+	BROWSER_ENTRY_LIMIT,
+} from "./common/paths.ts";
 import {
 	mkdirSync,
 	readFileSync,
@@ -186,7 +240,14 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	const status = createStatusStore(join(dir, "status.json"));
 	const routeStore = createRouteStore(join(dir, "routes.json"));
 	const userUsage = createUserUsageStore(join(dir, "user-usage.json"));
+	// Bridge-side session names (对话管理 → 重命名): DSH's own title service
+	// only retitles a session that is LIVE in its store, so historical sessions
+	// carry this alias instead.
+	const sessionAliases = createSessionAliasStore(join(dir, "session-aliases.json"));
 	const dedupe = createDedupeStore(join(dir, "dedupe.jsonl"));
+	// Parallel tasks per conversation: each task is its own agent + session +
+	// streaming card, and one of them is ACTIVE (what a plain message reaches).
+	const taskRegistry = createTaskRegistry(join(dir, "tasks.json"));
 	// Durable inbound-request journal (入站请求补发). Records agent-bound text
 	// requests before enqueue; on boot, accepted-but-undelivered requests are
 	// re-dispatched so a crash/plugin-reload/dsh-restart mid-turn doesn't drop
@@ -358,10 +419,13 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			sessionPrefix: "lark-link",
 			runNonce,
 			logger,
-			// Per-key resolution: conversation override ?? bridge default.
-			cwd: (key: string) =>
-				convCfg.get(key).workspaceRoot ??
-				(getCfg().workspaceRoot || process.cwd()),
+			// Per-key workspace: the ISOLATION-aware resolver (conversation
+			// override ?? per-user hash dir under the workspace root). This used
+			// to fall back to process.cwd() — which on the core service IS the
+			// shared dsh-workspace root — so every session ran in the flat root
+			// and per-user isolation silently never applied to new sessions.
+			// Lazy call: workspaceForTaskKey is defined later in this setup.
+			cwd: (key: string) => workspaceForTaskKey(key),
 			preset: (key: string) => {
 				const p =
 					convCfg.get(key).preset ?? (getCfg().agentPreset || "code");
@@ -369,7 +433,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			},
 			modelSelection: {
 				currentFor: (key: string) => {
-					const m = liveModelFor(key);
+					const m = liveModelFor(conversationKeyOf(key));
 					if (
 						m.provider &&
 						m.model &&
@@ -796,11 +860,57 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			).get?.("attachments"),
 	});
 
+	// Command replies share one CardKit entity per chat. The outbox remains the
+	// durable scheduler; its command-reply sender below first tries this panel
+	// and falls back to a standalone message only when CardKit is unavailable.
+	const commandPanelSync: CommandPanelSync = createCommandPanelSync({
+		createCard: async (payload) => {
+			const client = getLarkClient();
+			if (!client?.cardkitCreateCard) throw new Error("CardKit unavailable");
+			return client.cardkitCreateCard(payload);
+		},
+		deliverCard: async (cardId, chatId) => {
+			const client = getLarkClient();
+			if (!client?.cardkitDeliverCard) throw new Error("CardKit unavailable");
+			return client.cardkitDeliverCard({ chatId, cardId });
+		},
+		updateCard: async (cardId, body) => {
+			const client = getLarkClient();
+			if (!client?.cardkitUpdateCard) throw new Error("CardKit unavailable");
+			return client.cardkitUpdateCard(cardId, body);
+		},
+	});
+
 	// ---- outbox ---------------------------------------------------------------
 	const outboxSender: OutboxSender = {
 		async deliver(env, payload) {
 			const chatId = env.route.chatId;
 			try {
+				if (env.kind === "command-reply") {
+					const command = env.dedupeKey.includes(":cmd:")
+						? env.dedupeKey.split(":cmd:")[1]?.split(":")[0] ?? "command"
+						: env.dedupeKey.startsWith("bridge:")
+							? env.dedupeKey.split(":")[1] ?? "command"
+							: "command";
+					const panelUpdated = payload.kind === "card"
+						? await commandPanelSync.showCard(
+							chatId,
+							env.dedupeKey,
+							command,
+							payload.card,
+						)
+						: await commandPanelSync.append(chatId, {
+							id: env.dedupeKey,
+							command,
+							result: payload.kind === "text" ? payload.text : "命令已完成",
+							...(payload.kind === "text" && payload.status
+								? { status: payload.status }
+								: {}),
+						});
+					if (panelUpdated && (payload.kind === "text" || payload.kind === "card")) {
+						return { ok: true };
+					}
+				}
 				if (payload.kind === "text") {
 					if (payload.card !== undefined)
 						await sender.sendCard(chatId, payload.card);
@@ -859,11 +969,40 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		}
 		return handle;
 	};
+	/**
+	 * Routes are stored per CONVERSATION; everything downstream of the
+	 * ConversationManager speaks TASK keys (`dm:oc_x#2`) — so every consumer of
+	 * a task key has to strip the `#n` suffix before a route lookup. (Forgetting
+	 * this made the forwarder drop every event silently: the bot never replied.)
+	 */
+	const routeForTaskKey = (taskKey: string) => routeStore.get(conversationKeyOf(taskKey));
+
+	/**
+	 * Route of the conversation that OWNS a session id (what tools receive).
+	 * Three layers, cheapest first:
+	 *   1. the backend reverse map (authoritative, but EMPTY for a resumed task,
+	 *      a disposed idle agent or a web-GUI session — `keyBySession.delete` on
+	 *      dispose, and nothing registers a GUI session at all);
+	 *   2. parse the id (`conversationKeyForSessionId`);
+	 *   3. scan the routes for one whose key the id embeds.
+	 * Layers 2–3 matter: the old inline fallback could not parse
+	 * `…:<nonce>:<index>` and returned an unparsed task key, so tool calls died
+	 * with "无法定位当前飞书会话" even though the conversation existed.
+	 */
+	const routeForSessionId = (sessionId: string) => {
+		const backendKey = bridge.backend?.keyForSessionId?.(sessionId);
+		return (
+			(backendKey ? routeStore.get(conversationKeyOf(backendKey)) : undefined) ??
+			routeStore.get(conversationKeyForSessionId(sessionId)) ??
+			routeStore.all().find((r) => sessionId.includes(r.sessionKey))
+		);
+	};
+
 	const notifyCardkitFailure = (sessionKey: string, err: unknown): void => {
 
 		if (cardkitNotified.has(sessionKey)) return;
 		cardkitNotified.add(sessionKey);
-		const chatId = routeStore.get(sessionKey)?.chatId;
+		const chatId = routeForTaskKey(sessionKey)?.chatId;
 		if (!chatId) return;
 		const msg = err instanceof Error ? err.message : String(err);
 		void sender
@@ -897,7 +1036,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				return client?.cardkitUpdateCard ? await client.cardkitUpdateCard(cardId, body) : {};
 			},
 		},
-		routeFor: (key) => routeStore.get(key),
+		routeFor: (key) => routeForTaskKey(key),
 		deliverCard: async ({ chatId, cardId }) => {
 			const client = getLarkClient();
 			return client?.cardkitDeliverCard ? await client.cardkitDeliverCard({ chatId, cardId }) : {};
@@ -910,14 +1049,14 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	const forwarder = createEventForwarder({
 		outbox,
 		taskCardSyncer,
-		routeFor: (key) => routeStore.get(key),
+		routeFor: (key) => routeForTaskKey(key),
 
 		// Streaming cards stay off (省流量) unless hot-reloaded via
 		// /lark-config streaming.enabled=true; the StreamTarget exists so
-		// turn/end can always mark the trigger message DONE (pi design:
-		// 随机表情回执 + 完成打 DONE). markDone is best-effort via the sender.
+		// turn/end can always receipt the trigger message (fixed state-mapped
+		// reactions: OnIt 收到 / DONE 完成 / ERROR 失败). best-effort via the sender.
 		streamFor: (sessionKey) => {
-			const route = routeStore.get(sessionKey);
+			const route = routeForTaskKey(sessionKey);
 			if (!route) return undefined;
 			return {
 				route: {
@@ -959,6 +1098,14 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 						printFrequencyMs: cfgStream.printFrequencyMs,
 						printStep: cfgStream.printStep,
 						minPushIntervalMs: 800,
+						// A long turn has to drop detail to stay inside CardKit's
+						// card-size budget; log the level CHANGE so the degradation
+						// is observable instead of silently guessed at.
+						onCompacted: ({ stage, scale, bytes }) => {
+							logger.info(
+								`cardkit stream compacted for ${sessionKey}: stage=${stage} detailScale=${scale.toFixed(2)} bytes=${bytes}`,
+							);
+						},
 						onError: (err) => {
 							const errStr = String(err);
 							if (!errStr.includes("230020") && !errStr.includes("rate limit")) {
@@ -985,24 +1132,36 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 						payload: { kind: "text", text },
 					});
 				},
-				markDone: () => bridge.markDone(sessionKey, route.lastMessageId),
+				markDone: (messageId) =>
+					bridge.markDone(
+						conversationKeyOf(sessionKey),
+						messageId ?? route.lastMessageId,
+					),
+				markError: (messageId) =>
+					bridge.markError(
+						conversationKeyOf(sessionKey),
+						messageId ?? route.lastMessageId,
+					),
 			};
 		},
 		cfg: () => ({ streamingEnabled: getCfg().streaming.enabled }),
+		warn: (message) => logger.warn(message),
 		// Durable output enqueued → the triggering user request has been
 		// answered, so it won't be re-triggered after a crash. Best-effort.
-		onDelivered: (sessionKey) => {
+		onDelivered: (taskOrConversationKey) => {
 			try {
-				const route = routeStore.get(sessionKey);
-				if (route?.lastMessageId) {
-					inboundWal.delivered(route.lastMessageId);
-					status.refreshCounters({
-						inboundPending: inboundWal.pendingReplays().length,
-						inboundFailed: inboundWal.failedCount(),
-					});
-				}
+				// The forwarder speaks TASK keys; the WAL is per conversation.
+				const delivered = inboundWal.deliveredOldest(
+					conversationKeyOf(taskOrConversationKey),
+				);
+				status.refreshCounters({
+					inboundPending: inboundWal.pendingReplays().length,
+					inboundFailed: inboundWal.failedCount(),
+				});
+				return delivered?.messageId;
 			} catch {
 				// swallow — WAL failures never break delivery
+				return undefined;
 			}
 		},
 	});
@@ -1054,7 +1213,8 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			custom?: string;
 		}> = [];
 		const key = backend?.keyForSessionId?.(agentId);
-		const route = key ? routeStore.get(key) : undefined;
+		// The backend maps a session to its TASK key; routes are per conversation.
+		const route = key ? routeForTaskKey(key) : undefined;
 		const chatId = route?.chatId;
 		if (!chatId) {
 			logger.warn(`ask_user_question: no Feishu route for ${agentId}`);
@@ -1171,6 +1331,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		cmdName: string,
 		msg: FeishuInboundMessage,
 		textOrCard: string | unknown,
+		opts?: { status?: "ok" | "error" },
 	): Promise<void> => {
 		const key = bridge.conversationKeyFor(msg);
 		await outbox.enqueue({
@@ -1184,9 +1345,404 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			kind: "command-reply",
 			payload:
 				typeof textOrCard === "string"
-					? { kind: "text", text: textOrCard }
+					? {
+							kind: "text",
+							text: textOrCard,
+							...(opts?.status ? { status: opts.status } : {}),
+						}
 					: { kind: "card", card: textOrCard as never },
 		});
+	};
+
+	// ---- conversation management (对话管理) ---------------------------------
+	// Shared session plumbing for /resume and /manage: both list ONE workspace's
+	// persisted sessions (service headers preferred, filesystem scan fallback)
+	// and both resolve titles the same way, so the picker and the management
+	// panel can never disagree about what exists.
+	const ctxGet = (serviceName: string): unknown =>
+		(ctx as unknown as { get?(name: string): unknown }).get?.(serviceName);
+
+	/** Structural slice of the host's sessionPersistence service. */
+	interface PersistenceSlice {
+		list?(): Promise<
+			Array<{
+				id: string;
+				createdAt: number;
+				cwd?: string;
+				agentPreset?: string;
+				origin?: string;
+				title?: string;
+			}>
+		>;
+		inspect?(id: string): Promise<{ meta?: unknown; events?: readonly unknown[] } | undefined>;
+		load?(id: string): Promise<{ header?: unknown; events?: readonly unknown[] } | undefined>;
+		readFrom?(id: string, fromSeq: number): Promise<{ meta?: unknown; events?: readonly unknown[] } | undefined>;
+		open?(id: string, access: "read"): Promise<{
+			read(offset?: number, length?: number): Promise<{ events: readonly unknown[] }>;
+			close(): Promise<void>;
+		}>;
+	}
+	const persistenceSlice = (): PersistenceSlice | undefined =>
+		ctxGet("sessionPersistence") as PersistenceSlice | undefined;
+
+	const listConversationSessions = async (key: string): Promise<WorkspaceSessionInfo[]> => {
+		const wsRoot = workspaceForTaskKey(key);
+		const persistence = persistenceSlice();
+		const titleService = ctxGet("sessionTitle") as {
+			get?(session: unknown): { title?: string } | undefined;
+		} | undefined;
+		const liveSessions = ctxGet("sessions") as { get?(id: string): unknown } | undefined;
+		const titleFor = (sid: string): string | undefined => {
+			try {
+				const sess = liveSessions?.get?.(sid) as { events?: readonly unknown[] } | undefined;
+				if (!sess) return undefined;
+				const fromService = titleService?.get?.(sess)?.title;
+				if (fromService) return fromService;
+				if (sess.events) return extractTitleFromEvents(sess.events);
+			} catch {
+				// Titles are decoration — never fail a listing over one.
+			}
+			return undefined;
+		};
+		try {
+			return await listWorkspaceSessions({
+				sessionsRoot: resolveSessionsRoot(),
+				cwd: wsRoot,
+				persistence: persistence?.list
+					? {
+							list: async () => await persistence.list!(),
+							inspect: persistence.inspect
+								? async (id: string) => await persistence.inspect!(id)
+								: undefined,
+							load: persistence.load
+								? async (id: string) => await persistence.load!(id)
+								: undefined,
+							readFrom: persistence.readFrom
+								? async (id: string, fromSeq: number) =>
+										await persistence.readFrom!(id, fromSeq)
+								: undefined,
+							open: persistence.open
+								? async (id: string, access: "read") =>
+										await persistence.open!(id, access)
+								: undefined,
+						}
+					: undefined,
+				titleFor,
+			});
+		} catch (err) {
+			logger.warn(
+				`session listing failed for ${wsRoot}: ${err instanceof Error ? err.message : String(err)}`,
+			);
+			return [];
+		}
+	};
+
+	/**
+	 * Workspace of one conversation.
+	 *
+	 * With isolation on (default) every user/group owns
+	 * `<workspaceRoot>/<5-letter hash of its id>/`, and an explicit /workspace
+	 * override only counts while it stays inside that subtree — a stale or
+	 * hand-edited override can never hand one user another's directory.
+	 */
+	const workspaceFor = (key: string): string => {
+		// Base = the configured workspace, else the deployment convention
+		// (`$HOME/dsh-workspace`, the same default run-linux.sh hands to DSH Core).
+		// Falling back to process.cwd() put user roots inside the plugin install.
+		const base = getCfg().workspaceRoot || join(homedir(), "dsh-workspace");
+		const explicit = convCfg.get(key).workspaceRoot;
+		if (!getCfg().workspaceIsolation) {
+			return explicit ?? base;
+		}
+		const ownerId = taskRegistry.owner(key).id ?? key;
+		return ensureWorkspaceDir(resolveIsolatedWorkspace(base, ownerId, explicit));
+	};
+
+	/** The user's isolation root (absolute), whether or not an override is in force. */
+	const isolationRootFor = (key: string): string =>
+		userWorkspaceRoot(
+			getCfg().workspaceRoot || join(homedir(), "dsh-workspace"),
+			taskRegistry.owner(key).id ?? key,
+		);
+
+	/** Adapter-facing variant: the argument is a TASK key (`dm:oc_x#2`). */
+	const workspaceForTaskKey = (key: string): string =>
+		workspaceFor(conversationKeyOf(key));
+
+	/** Live session id of one conversation (agent first, then the stored override). */
+	const currentSessionFor = (key: string): string | undefined =>
+		bridge.backend?.get(key)?.sessionId ?? convCfg.get(key).activeSessionId;
+
+	/** Rows for the management panel: alias applied, current session always shown. */
+	const manageRowsFor = async (key: string): Promise<ManageableSession[]> => {
+		const rows = await listConversationSessions(key);
+		const list: ManageableSession[] = rows.map((row) => ({
+			id: row.id,
+			createdAt: row.createdAt,
+			...(row.title ? { title: row.title } : {}),
+			...(sessionAliases.get(row.id) ? { alias: sessionAliases.get(row.id) } : {}),
+			...(row.preset ? { preset: row.preset } : {}),
+			...(row.summary ? { summary: row.summary } : {}),
+			...(typeof row.userTurns === "number" ? { userTurns: row.userTurns } : {}),
+			...(typeof row.toolCalls === "number" ? { toolCalls: row.toolCalls } : {}),
+			...(typeof row.lastActivityAt === "number" ? { lastActivityAt: row.lastActivityAt } : {}),
+			cwd: workspaceFor(key),
+		}));
+		// A brand-new conversation's session has no log yet, so the listing
+		// cannot contain it — show it anyway: it is exactly the one users want to
+		// rename (and the only one that can carry a real DSH title).
+		const current = currentSessionFor(key);
+		if (current && !list.some((row) => row.id === current)) {
+			const alias = sessionAliases.get(current);
+			list.unshift({
+				id: current,
+				createdAt: Date.now(),
+				...(alias ? { alias } : {}),
+				cwd: workspaceFor(key),
+			});
+		}
+		return list;
+	};
+
+	// ---- parallel tasks (任务列表 / 切换) -------------------------------------
+	/**
+	 * Every task of one conversation, plus the historical sessions that no task
+	 * has claimed yet — that union is what replaces the old /resume picker.
+	 * Status comes from the live agents (running = mid-turn), titles and
+	 * summaries from the workspace log.
+	 */
+	const taskRowsFor = async (key: string): Promise<TaskRow[]> => {
+		const tasks = conversations.tasks(key); // newest first
+		const activeId = conversations.activeTask(key)?.id;
+		const sessions = await listConversationSessions(key);
+		const bySession = new Map(sessions.map((session) => [session.id, session]));
+		const claimed = new Set<string>();
+		const baseRow = (task: TaskRecord): TaskRow => ({
+			taskId: task.id,
+			...(task.sessionId ? { sessionId: task.sessionId } : {}),
+			seq: task.seq,
+			...(task.label ? { label: task.label } : {}),
+			status: "stopped",
+			active: false,
+			lastActivityAt: task.lastActivityAt,
+		});
+		const rows: TaskRow[] = tasks.map((task) => {
+			if (task.sessionId) claimed.add(task.sessionId);
+			const info = task.sessionId ? bySession.get(task.sessionId) : undefined;
+			const alias = task.sessionId ? sessionAliases.get(task.sessionId) : undefined;
+			return {
+				...baseRow(task),
+				status: conversations.statusOf(task.id),
+				active: task.id === activeId,
+				lastActivityAt: info?.lastActivityAt ?? task.lastActivityAt,
+				...(alias ? { label: alias } : {}),
+				...(info?.title ? { title: info.title } : {}),
+				...(info?.summary ? { summary: info.summary } : {}),
+				...(info?.preset ? { preset: info.preset } : {}),
+			};
+		});
+		let seq = rows.length;
+		for (const session of sessions) {
+			if (claimed.has(session.id)) continue;
+			seq += 1;
+			const alias = sessionAliases.get(session.id);
+			rows.push({
+				sessionId: session.id,
+				seq,
+				status: "stopped",
+				active: false,
+				historical: true,
+				lastActivityAt: session.lastActivityAt ?? session.createdAt,
+				...(alias ? { label: alias } : {}),
+				...(session.title ? { title: session.title } : {}),
+				...(session.summary ? { summary: session.summary } : {}),
+				...(session.preset ? { preset: session.preset } : {}),
+			});
+		}
+		return rows;
+	};
+
+	/** One task's briefing card (status + what it has produced so far). */
+	const taskBriefingFor = async (
+		key: string,
+		row: TaskRow,
+		note?: string,
+	): Promise<unknown> => {
+		const snapshot = row.taskId ? forwarder.snapshot(row.taskId) : undefined;
+		return taskBriefingCard({
+			task: {
+				...row,
+				status: row.taskId ? conversations.statusOf(row.taskId) : "stopped",
+				active: true,
+				lastActivityAt: Date.now(),
+			},
+			...(snapshot ? { snapshot } : {}),
+			workspace: workspaceFor(key),
+			preset: convCfg.get(key).preset ?? getCfg().agentPreset,
+			...(note ? { note } : {}),
+		});
+	};
+
+	/**
+	 * Make one row the message target. A registered task is switched; a bare
+	 * historical session is bound to a NEW task and resumed, so "switch" works
+	 * for anything the listing shows.
+	 */
+	const switchToTaskRow = async (
+		key: string,
+		row: TaskRow,
+	): Promise<{ row: TaskRow; note: string }> => {
+		if (row.taskId) {
+			const { task } = await conversations.switchTask(key, row.taskId);
+			const status = conversations.statusOf(task.id);
+			return {
+				row: {
+					...row,
+					taskId: task.id,
+					...(task.sessionId ? { sessionId: task.sessionId } : {}),
+					status,
+					active: true,
+					lastActivityAt: Date.now(),
+				},
+				note:
+					status === "running"
+						? "已切换到运行中的任务：输出继续更新在它自己的卡片里（已续上流式）"
+						: "已切换到这个任务，下一条消息发到这里",
+			};
+		}
+		if (!row.sessionId) throw new Error("这一行既没有任务也没有会话");
+		const { task, agent } = await conversations.resumeTask(key, row.sessionId, {
+			...(row.preset ? { preset: row.preset } : {}),
+		});
+		const running = !agent.isIdle();
+		return {
+			row: {
+				...row,
+				taskId: task.id,
+				sessionId: task.sessionId ?? row.sessionId,
+				status: running ? "running" : "idle",
+				active: true,
+				historical: false,
+				lastActivityAt: Date.now(),
+			},
+			note: "已接管这条历史会话，下一条消息将续上它的上下文",
+		};
+	};
+
+	/** Resolve a typed /tasks argument: 1-based index, task id or session prefix. */
+	const findTaskRow = (
+		rows: ReadonlyArray<TaskRow>,
+		arg: string,
+	): TaskRow | undefined => {
+		let sel = arg;
+		try {
+			if (arg.includes("%")) sel = decodeURIComponent(arg);
+		} catch {
+			// malformed encoding — use the raw arg
+		}
+		const index = Number(sel);
+		if (Number.isInteger(index) && index >= 1) {
+			const viaIndex = rows.find((row) => row.seq === index);
+			if (viaIndex) return viaIndex;
+		}
+		return rows.find(
+			(row) =>
+				row.taskId === sel ||
+				row.sessionId === sel ||
+				(row.taskId?.startsWith(sel) ?? false) ||
+				(row.sessionId?.startsWith(sel) ?? false),
+		);
+	};
+
+	/** Session-admin dependencies (live probe + optional service delete). */
+	const sessionAdminDeps = (): SessionAdminDeps => {
+		const persistence = ctxGet("sessionPersistence") as
+			| {
+					delete?(id: string): Promise<void> | void;
+					remove?(id: string): Promise<void> | void;
+					destroy?(id: string): Promise<void> | void;
+				}
+			| undefined;
+		const serviceDelete =
+			persistence?.delete ?? persistence?.remove ?? persistence?.destroy;
+		const live = ctxGet("sessions") as { get?(id: string): unknown } | undefined;
+		const agents = ctxGet("agents") as { get?(id: string): unknown } | undefined;
+		return {
+			sessionsRoot: resolveSessionsRoot(),
+			isLive: (id: string) => Boolean(live?.get?.(id) ?? agents?.get?.(id)),
+			onServiceDeleteError: (id: string, err: unknown) =>
+				logger.warn(
+					`sessionPersistence.delete refused ${id} (removing the log anyway): ${
+						err instanceof Error ? err.message : String(err)
+					}`,
+				),
+			...(serviceDelete
+				? { serviceDelete: (id: string) => serviceDelete.call(persistence, id) }
+				: {}),
+		};
+	};
+
+	/**
+	 * Shared hot-reload applier for /lark-config (text form) and the `cfg:`
+	 * card toggles, so both paths validate and persist identically.
+	 */
+	const applyHotConfig = async (
+		rawKey: string,
+		rawValue: string,
+	): Promise<{ ok: true; key: string; value: unknown } | { ok: false; message: string }> => {
+		const key = rawKey.trim();
+		const raw = String(rawValue ?? "").trim();
+		let value: unknown = raw;
+		if (raw === "true" || raw === "false") value = raw === "true";
+		else if (raw !== "" && !Number.isNaN(Number(raw))) value = Number(raw);
+		try {
+			configStore.update(buildHotReloadPatch(key, value));
+			configStore.saveOverrides();
+			return { ok: true, key, value };
+		} catch (err) {
+			return {
+				ok: false,
+				message:
+					err instanceof Error && /not hot-reloadable/.test(err.message)
+						? `"${key}" 不可热改（可改: ${HOT_RELOADABLE.join(", ")}）`
+						: `更新失败: ${err instanceof Error ? err.message : String(err)}`,
+			};
+		}
+	};
+
+	/**
+	 * Build the /workspace browser card for one conversation (filesystem
+	 * snapshot). Only DIRECTORIES are listed, hidden entries are skipped, the
+	 * list is capped at BROWSER_ENTRY_LIMIT and ".." is offered exactly while
+	 * ascending is still possible — the browser may walk ABOVE the DSH
+	 * workspace up to the filesystem root (the model-facing tool
+	 * `lark_send_local_file` keeps its own workspace containment).
+	 */
+	const buildWorkspaceBrowserCard = (key: string, browsePath: string): unknown => {
+		const workspacePath = workspaceForTaskKey(key);
+		try {
+			if (!statSync(browsePath).isDirectory()) throw new Error("不是目录");
+			const all = readdirSync(browsePath, { withFileTypes: true })
+				.filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+				.sort((left, right) => left.name.localeCompare(right.name));
+			const entries = all.slice(0, BROWSER_ENTRY_LIMIT).map((entry) => ({
+				name: entry.name,
+				path: join(browsePath, entry.name),
+			}));
+			const parentPath = parentDirectory(browsePath);
+			return workspaceBrowserCard({
+				browsePath,
+				workspacePath,
+				...(parentPath ? { parentPath } : {}),
+				entries,
+				truncated: all.length > BROWSER_ENTRY_LIMIT,
+			});
+		} catch (err) {
+			return markdownCard(
+				`**无法浏览该目录**\n\n\`${browsePath}\`\n${err instanceof Error ? err.message : String(err)}`,
+				{ header: "工作区", accent: false },
+			);
+		}
 	};
 
 	const bridgeHandler = async (
@@ -1198,9 +1754,10 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			case "status":
 				await durableReply(name, 
 					msg,
-					formatStatusLine(status.get()) +
-						"\n\n" +
-						statusDetailLines(status.get()).join("\n"),
+					statusCard(
+						formatStatusLine(status.get()),
+						statusDetailLines(status.get()),
+					),
 				);
 				return true;
 			case "feishu-config":
@@ -1210,9 +1767,15 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				if (!arg) {
 					await durableReply(name, 
 						msg,
-						formatStatusLine(status.get()) +
-							"\n\n" +
-							statusDetailLines(status.get()).join("\n"),
+						configPanelCard({
+							streamingEnabled: getCfg().streaming.enabled,
+							reactionsEnabled: getCfg().reactions.enabled,
+							groupPolicy: getCfg().groupPolicy,
+							agentPreset: getCfg().agentPreset,
+							permissionMode: getCfg().permissionMode,
+							allowlist: getCfg().allowlist,
+							denyList: getCfg().denyList,
+						}),
 					);
 					return true;
 				}
@@ -1226,29 +1789,19 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 					);
 					return true;
 				}
-				const key = arg.slice(0, eq).trim();
-				const rawVal = arg.slice(eq + 1).trim();
-				// Type-coerce: booleans and numbers stay typed for config.
-				let val: unknown = rawVal;
-				if (rawVal === "true" || rawVal === "false") val = rawVal === "true";
-				else if (rawVal !== "" && !Number.isNaN(Number(rawVal)))
-					val = Number(rawVal);
 				// Dotted paths (streaming.enabled) resolve into a NESTED patch —
 				// previously only exact top-level whitelist names matched, so
-				// `/lark-config streaming.enabled=true` answered 不可热改.
-				try {
-					configStore.update(buildHotReloadPatch(key, val));
-					configStore.saveOverrides();
-				} catch (err) {
-					await durableReply(name,
-						msg,
-						err instanceof Error && /not hot-reloadable/.test(err.message)
-							? `"${key}" 不可热改（可改: ${HOT_RELOADABLE.join(", ")}）`
-							: `更新失败: ${err instanceof Error ? err.message : String(err)}`,
-					);
-					return true;
-				}
-				await durableReply(name, msg, `已更新 ${key}=${JSON.stringify(val)}`);
+				// `/lark-config streaming.enabled=true` answered 不可热改. The
+				// shared applier is also used by the `cfg:` card toggles.
+				const applied = await applyHotConfig(arg.slice(0, eq), arg.slice(eq + 1));
+				await durableReply(
+					name,
+					msg,
+					applied.ok
+						? `已更新 ${applied.key}=${JSON.stringify(applied.value)}`
+						: applied.message,
+					applied.ok ? undefined : { status: "error" },
+				);
 				return true;
 			}
 			case "support":
@@ -1280,6 +1833,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 							);
 							if (uploadKey) {
 								await sender.sendFile(msg.chatId, uploadKey, "file");
+								await durableReply(name, msg, "✅ 诊断包已发送");
 								return true;
 							}
 						}
@@ -1299,6 +1853,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 						);
 						if (uploadKey) {
 							await sender.sendFile(msg.chatId, uploadKey, "file");
+							await durableReply(name, msg, "✅ 诊断报告已发送");
 							return true;
 						}
 					} catch (err) {
@@ -1310,15 +1865,57 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				await durableReply(name, msg, diag.text);
 				return true;
 			}
+			case "manage":
 			case "sessions": {
-				// List live bridge sessions (pi f752ece /sessions 决策).
-				const keys = bridge.conversations?.keys() ?? [];
-				const lines = keys.length
-					? keys.map((k) => `- ${k}`)
-					: ["（无活跃会话）"];
-				await durableReply(name, 
+				// 对话管理: one panel for the destructive / structural operations
+				// (rename · delete · migrate project). They used to live in the
+				// /resume picker, where a single mis-tap destroyed a session;
+				// recovery stays there, management moved here. `/sessions` is kept
+				// as an alias so the old habit still lands somewhere useful.
+				const key = bridge.conversationKeyFor(msg);
+				const current = currentSessionFor(key);
+				const arg = _rawInput.trim();
+				if (!arg) {
+					await durableReply(
+						name,
+						msg,
+						sessionManageCard({
+							sessions: await manageRowsFor(key),
+							currentSessionId: current,
+						}),
+					);
+					return true;
+				}
+				// `/manage <序号>` or `/manage <会话ID前缀>` opens that session's
+				// detail card directly (the card buttons do the same).
+				const rows = await manageRowsFor(key);
+				let sel = arg;
+				try {
+					if (arg.includes("%")) sel = decodeURIComponent(arg);
+				} catch {
+					// malformed encoding — use the raw arg
+				}
+				const index = Number(sel);
+				const picked =
+					Number.isInteger(index) && index >= 1 && index <= rows.length
+						? rows[index - 1]
+						: rows.find((row) => row.id === sel || row.id.startsWith(sel));
+				if (!picked) {
+					await durableReply(
+						name,
+						msg,
+						sessionManageCard({
+							sessions: rows,
+							currentSessionId: current,
+							note: `未找到会话「${arg}」，请从下面的列表中选择`,
+						}),
+					);
+					return true;
+				}
+				await durableReply(
+					name,
 					msg,
-					`**会话列表 (${keys.length})**\n\n` + lines.join("\n"),
+					sessionManageDetailCard({ session: picked, currentSessionId: current }),
 				);
 				return true;
 			}
@@ -1328,15 +1925,37 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			case "workspace": {
 				const arg = _rawInput.trim();
 				const wsKey = bridge.conversationKeyFor(msg);
-				// Per-conversation workspace: this chat's override ?? bridge default.
-				const curWs =
-					convCfg.get(wsKey).workspaceRoot ??
-					(getCfg().workspaceRoot || process.cwd());
+				// Per-conversation workspace: isolation-aware (override honored
+				// only inside the user's subtree).
+				const curWs = workspaceForTaskKey(wsKey);
 				if (!arg) {
 					await durableReply(name, 
 						msg,
-						`工作区: ${curWs}`,
+						buildWorkspaceBrowserCard(wsKey, curWs),
 					);
+					return true;
+				}
+				// Text fallback for creating a folder when the card form is
+				// unavailable (old clients / schema validation): /workspace mk <名称>
+				if (arg === "mk" || arg.startsWith("mk ")) {
+					try {
+						const dirName = sanitizeDirectoryName(arg.slice(2).trim());
+						const target = join(curWs, dirName);
+						if (existsSync(target)) throw new Error("该目录已存在");
+						mkdirSync(target, { recursive: false });
+						await durableReply(
+							name,
+							msg,
+							`已创建目录: ${target}\n发送 /workspace 打开浏览器即可切换过去。`,
+						);
+					} catch (err) {
+						await durableReply(
+							name,
+							msg,
+							`创建失败: ${err instanceof Error ? err.message : String(err)}`,
+							{ status: "error" },
+						);
+					}
 					return true;
 				}
 				// /workspace <path> — switch the bridge workspace root: persist it
@@ -1377,7 +1996,52 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				);
 				return true;
 			}
+			case "tasks": {
+				// 任务列表（替代 /resume）：运行中优先，一键切换。切换后会发送该任务
+				// 的现状，仍在运行时输出继续更新在它自己的卡片里（已续上流式）。
+				const key = bridge.conversationKeyFor(msg);
+				const rows = await taskRowsFor(key);
+				const arg = _rawInput.trim();
+				if (!arg) {
+					await durableReply(
+						name,
+						msg,
+						taskListCard({ tasks: rows, workspace: workspaceFor(key) }),
+					);
+					return true;
+				}
+				const picked = findTaskRow(rows, arg);
+				if (!picked) {
+					await durableReply(
+						name,
+						msg,
+						taskListCard({
+							tasks: rows,
+							workspace: workspaceFor(key),
+							note: `没有找到「${arg}」，请从下面的列表里选`,
+						}),
+					);
+					return true;
+				}
+				try {
+					const { row, note } = await switchToTaskRow(key, picked);
+					await durableReply(name, msg, await taskBriefingFor(key, row, note));
+				} catch (err) {
+					await durableReply(
+						name,
+						msg,
+						`切换失败：${err instanceof Error ? err.message : String(err)}`,
+						{ status: "error" },
+					);
+				}
+				return true;
+			}
 			case "resume": {
+				// /resume 已并入 /tasks：任务列表同时包含"还在跑的任务"与尚未认领的
+				// 历史会话，切换即恢复。保留命令名，旧习惯仍然落在同一个面板。
+				return bridgeHandler("tasks", _rawInput.trim(), msg);
+			}
+			case "_legacy_resume_picker": {
 				// /resume — resume a HISTORICAL session of THIS conversation's
 				// workspace: no arg renders the picker (service-sourced headers
 				// preferred, filesystem scan fallback); an arg picks by list
@@ -1386,97 +2050,20 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				// stored log is loaded via agents.resume, so the NEXT message
 				// continues that conversation's context.
 				const key = bridge.conversationKeyFor(msg);
-				const wsRoot =
-					convCfg.get(key).workspaceRoot ??
-					(getCfg().workspaceRoot || process.cwd());
-				const currentSessionId =
-					bridge.backend?.get(key)?.sessionId ??
-					convCfg.get(key).activeSessionId;
-				const persistence = (
-					ctx as unknown as { get?(name: string): unknown }
-				).get?.("sessionPersistence") as
-					| {
-							list?(): Promise<
-								Array<{
-									id: string;
-									createdAt: number;
-									cwd?: string;
-									agentPreset?: string;
-									origin?: string;
-									title?: string;
-								}>
-							>;
-							inspect?(id: string): Promise<{ meta?: unknown; events?: readonly unknown[] } | undefined>;
-							load?(id: string): Promise<{ header?: unknown; events?: readonly unknown[] } | undefined>;
-							readFrom?(id: string, fromSeq: number): Promise<{ meta?: unknown; events?: readonly unknown[] } | undefined>;
-					  }
-					| undefined;
-				let sessions: Array<{
-					id: string;
-					createdAt: number;
-					preset?: string;
-					title?: string;
-					source: string;
-				}> = [];
-				const titleService = (ctx as unknown as { get?(name: string): unknown }).get?.("sessionTitle") as {
-					get?(session: unknown): { title?: string } | undefined;
-				} | undefined;
-				const liveSessions = (ctx as unknown as { get?(name: string): unknown }).get?.("sessions") as {
-					get?(id: string): unknown;
-				} | undefined;
-				const titleFor = (sid: string): string | undefined => {
-					try {
-						const sess = liveSessions?.get?.(sid) as { events?: readonly unknown[] } | undefined;
-						if (sess) {
-							if (titleService?.get) {
-								const res = titleService.get(sess);
-								if (res?.title) return res.title;
-							}
-							if (sess.events) {
-								const extracted = extractTitleFromEvents(sess.events);
-								if (extracted) return extracted;
-							}
-						}
-					} catch {
-						// ignore
-					}
-					return undefined;
-				};
-
-				try {
-					sessions = await listWorkspaceSessions({
-						sessionsRoot: join(
-							process.env.DSH_HOME ?? join(homedir(), ".dsh"),
-							"sessions",
-						),
-						cwd: wsRoot,
-						persistence: persistence?.list
-							? {
-									list: async () => await persistence.list!(),
-									inspect: persistence.inspect
-										? async (id: string) => await persistence.inspect!(id)
-										: undefined,
-									load: persistence.load
-										? async (id: string) => await persistence.load!(id)
-										: undefined,
-									readFrom: persistence.readFrom
-										? async (id: string, fromSeq: number) =>
-												await persistence.readFrom!(id, fromSeq)
-										: undefined,
-								}
-							: undefined,
-						titleFor,
-					});
-				} catch (err) {
-					logger.warn(
-						`resume: listing workspace sessions failed: ${err instanceof Error ? err.message : String(err)}`,
-					);
-				}
+				const currentSessionId = currentSessionFor(key);
+				// Titles come from the shared listing, which already merges the
+				// bridge alias-free title sources (service, then the log events) —
+				// /manage layers its own alias on top.
+				const sessions = await listConversationSessions(key);
+				logger.info(
+					`resume: ${sessions.length} session(s) for ${workspaceFor(key)}; current=${currentSessionId ?? "none"}`,
+				);
 
 				const arg = _rawInput.trim();
 				if (!arg) {
-					await sender.sendCard(
-						msg.chatId,
+					await durableReply(
+						name,
+						msg,
 						resumeCard(sessions, currentSessionId),
 					);
 					return true;
@@ -1515,18 +2102,20 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 					return true;
 				}
 				try {
-					await bridge.backend?.resumeAgent(
+					await conversations.resume(
 						key,
 						pick.id,
 						pick.preset ? { preset: pick.preset } : undefined,
 					);
+					logger.info(`resume: ${key} restored ${pick.id}`);
 					const resumedHandle = bridge.backend?.get(key);
 					const rawAgent = resolveRawAgent(resumedHandle);
-					await sender.sendCard(
-						msg.chatId,
+					await durableReply(
+						name,
+						msg,
 						buildSessionResumedCard({
 							sessionId: pick.id,
-							workspacePath: wsRoot,
+							workspacePath: workspaceFor(key),
 							preset: pick.preset,
 						}),
 					);
@@ -1542,7 +2131,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			}
 			case "goal": {
 				const key = bridge.conversationKeyFor(msg);
-
+				const wsRoot = workspaceForTaskKey(key);
 				const arg = _rawInput.trim();
 				let agentHandle = bridge.backend?.get(key);
 				if (!agentHandle) {
@@ -1569,22 +2158,20 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				}
 
 				if (!arg) {
-					if (currentGoal) {
-						let phaseLabel = "已暂停";
-						if (currentGoal.phase === "active") phaseLabel = "执行中";
-						else if (currentGoal.phase === "complete") phaseLabel = "已完成";
-						await durableReply(
-							name,
-							msg,
-							`🎯 当前目标 (${phaseLabel})：${currentGoal.objective}\n🔄 轮次：${currentGoal.roundsStarted}/${currentGoal.maxGoalRounds}\n💡 可发送 /goal pause 暂停、/goal resume 恢复、/goal clear 清除。`,
-						);
-					} else {
-						await durableReply(
-							name,
-							msg,
-							"🎯 **目标模式 (/goal)**：发送 `/goal <任务目标>` 即可启动目标长任务。\n\n常用命令：\n- `/goal <目标描述>`：设定新目标并开始自主执行\n- `/goal pause`：暂停当前目标\n- `/goal resume`：恢复执行目标\n- `/goal clear`：清除当前目标",
-						);
-					}
+					// Cards carry the controls (pause / resume / clear / templates)
+					// instead of a text-only hint: buildGoalControlCard and
+					// buildGoalSetupCard existed but previously had NO producer, so
+					// the goal buttons in the task board could never be reached from
+					// the command itself.
+					await durableReply(
+						name,
+						msg,
+						currentGoal
+							? buildGoalControlCard(currentGoal, {
+									workspacePath: wsRoot,
+								})
+							: buildGoalSetupCard(),
+					);
 					return true;
 				}
 
@@ -1641,26 +2228,50 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				return true;
 			}
 			case "stop": {
-
-
 				const key = bridge.conversationKeyFor(msg);
 				await bridge.conversations?.stop(key);
-				await durableReply(name, msg, "已停止当前会话任务");
+				await durableReply(
+					name,
+					msg,
+					stopResultCard({
+						text: "已向当前会话发送停止请求，正在运行的轮次会被取消。",
+					}),
+				);
 				return true;
 			}
 			case "new": {
-				// /new — start a fresh conversation in the current workspace:
-				// bump the session generation and dispose the agent so the next
-				// message opens a NEW session row (never forwarded to the model).
+				// /new — reset this conversation onto a fresh session in the current
+				// workspace. Resetting is one tap away in the control panel but it
+				// discards the live context, so the bare command asks first:
+				//   /new          → confirmation card
+				//   /new confirm  → rotate (panel button `new:confirm`)
+				//   /new cancel   → dismiss  (panel button `new:cancel`)
 				const key = bridge.conversationKeyFor(msg);
-				convCfg.set(key, { activeSessionId: undefined });
-				await conversations?.rotate(key);
-				const newWs =
-					convCfg.get(key).workspaceRoot ??
-					(getCfg().workspaceRoot || process.cwd());
-				await durableReply(name, 
+				// The card must show the workspace the new task will REALLY use:
+				// with isolation on that is the per-user hash directory, not the
+				// shared root (showing the root made the isolation look broken).
+				const newWs = workspaceFor(key);
+				const newMode = _rawInput.trim();
+				if (newMode === "cancel") {
+					await durableReply(name, msg, "已取消，保持当前会话。");
+					return true;
+				}
+				if (newMode !== "confirm") {
+					await durableReply(
+						name,
+						msg,
+						newConfirmCard({ workspace: newWs }),
+					);
+					return true;
+				}
+				// Confirmed: open a NEW TASK. The previous task is NOT rotated away —
+				// it keeps its agent, its session and its streaming card, so a long
+				// job started earlier continues while this new task runs (多任务并行).
+				const task = conversations.createTask(key);
+				await durableReply(
+					name,
 					msg,
-					`已开启新会话（工作区: ${newWs}）。下一条消息开始全新上下文。`,
+					`已开启任务 #${task.seq}（工作区: ${newWs}）。下一条消息在这里开始全新上下文；之前任务继续运行，用 /tasks 查看与切换。`,
 				);
 				return true;
 			}
@@ -1700,7 +2311,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 							});
 						}
 					}
-					await sender.sendCard(msg.chatId, modelCard(current, groups));
+					await durableReply(name, msg, modelCard(current, groups));
 					return true;
 				}
 				// Switch: accept provider/model or bare model id (same provider).
@@ -1772,7 +2383,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				}
 				const arg = _rawInput.trim().toLowerCase();
 				if (!arg) {
-					await sender.sendCard(msg.chatId, reasoningCard(
+					await durableReply(name, msg, reasoningCard(
 						{ provider: selected.provider, model: selected.model },
 						selected.reasoningEffort,
 						reasoning.defaultEffort,
@@ -1806,8 +2417,9 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				const roster = live.length > 0 ? live : [...AGENT_PRESETS];
 				const arg = _rawInput.trim().toLowerCase();
 				if (!arg) {
-					await sender.sendCard(
-						msg.chatId,
+					await durableReply(
+						name,
+						msg,
 						withButtons(
 							modeCard(getCfg().agentPreset, roster),
 							roster
@@ -1852,8 +2464,9 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				// (Tier 1) so the picker card shows instead of plain text.
 				const arg = _rawInput.trim().toLowerCase();
 				if (!arg) {
-					await sender.sendCard(
-						msg.chatId,
+					await durableReply(
+						name,
+						msg,
 						withButtons(
 							permissionCard(getCfg().permissionMode),
 							PERMISSION_PRESETS.map((p) =>
@@ -1919,7 +2532,195 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			case "lark": {
 				// Feishu-side /lark subcommands — same executor as the DSH command.
 				const sub = _rawInput.trim().split(/\s+/)[0] ?? "";
+				if (!sub) {
+					// Bare /lark renders the administration panel so every
+					// subcommand is one tap away; the buttons map back onto the very
+					// same executor below.
+					const credentials = await resolveCredentials(
+						credStore,
+						getCfg().credentialRef,
+					);
+					await durableReply(
+						name,
+						msg,
+						larkAdminPanelCard({
+							connState: status.get().connState,
+							configured: Boolean(credentials),
+						}),
+					);
+					return true;
+				}
 				await durableReply(name, msg, await runLarkSubcommand(sub.toLowerCase()));
+				return true;
+			}
+			case "menu": {
+				await durableReply(name, msg, commandPanelCard());
+				return true;
+			}
+			case "cfg": {
+				// Card-driven config toggles: op form `cfg:<key>=<value>` emitted by
+				// the settings panel. Same validator/persister as /lark-config.
+				const arg = _rawInput.trim();
+				const eq = arg.indexOf("=");
+				if (eq === -1) {
+					await durableReply(name, msg, "用法：/lark-config <key>=<value>", {
+						status: "error",
+					});
+					return true;
+				}
+				const applied = await applyHotConfig(arg.slice(0, eq), arg.slice(eq + 1));
+				await durableReply(
+					name,
+					msg,
+					applied.ok
+						? `已更新 ${applied.key}=${JSON.stringify(applied.value)}`
+						: applied.message,
+					applied.ok ? undefined : { status: "error" },
+				);
+				return true;
+			}
+			case "stream": {
+				const arg = _rawInput.trim().toLowerCase();
+				const current = getCfg().streaming.enabled;
+				if (arg !== "on" && arg !== "off") {
+					await durableReply(
+						name,
+						msg,
+						`流式卡片当前: ${current ? "🟢 已开启" : "⚪ 已关闭"}\n用法: \`/stream on\` 或 \`/stream off\`（也可在 /lark-config 面板点按钮）`,
+					);
+					return true;
+				}
+				const applied = await applyHotConfig(
+					"streaming.enabled",
+					String(arg === "on"),
+				);
+				await durableReply(
+					name,
+					msg,
+					applied.ok
+						? `流式卡片已${arg === "on" ? "开启" : "关闭"}，立即生效。`
+						: applied.message,
+					applied.ok ? undefined : { status: "error" },
+				);
+				return true;
+			}
+			case "reconnect": {
+				try {
+					const result = await applyBridgeControl?.("restart");
+					await durableReply(
+						name,
+						msg,
+						`已重连，当前连接状态: \`${result?.connState ?? status.get().connState}\``,
+					);
+				} catch (err) {
+					await durableReply(
+						name,
+						msg,
+						`重连失败: ${err instanceof Error ? err.message : String(err)}`,
+						{ status: "error" },
+					);
+				}
+				return true;
+			}
+			case "cwd": {
+				const key = bridge.conversationKeyFor(msg);
+				const override = convCfg.get(key);
+				const ws = workspaceForTaskKey(key);
+				await durableReply(
+					name,
+					msg,
+					`📁 当前工作区: \`${ws}\`\n来源: ${
+						override.workspaceRoot ? "本会话 /workspace 覆盖" : "机器人默认设置"
+					}`,
+				);
+				return true;
+			}
+			case "whoami": {
+				const key = bridge.conversationKeyFor(msg);
+				const handle = bridge.backend?.get(key);
+				const route = routeStore.get(key);
+				const override = convCfg.get(key);
+				const selected = liveModelFor(key);
+				const lines = [
+					"**当前会话诊断**",
+					"",
+					`- 会话键: \`${key}\``,
+					`- 用户 open_id: \`${msg.senderOpenId || "—"}\``,
+					`- chat_id: \`${msg.chatId}\` (${msg.chatType})`,
+					`- 活跃 session: \`${handle?.sessionId ?? override.activeSessionId ?? "（尚未建立）"}\``,
+					`- 工作区: \`${workspaceForTaskKey(key)}\` (${
+						override.workspaceRoot ? "本会话覆盖" : "按用户隔离"
+					})`,
+					`- 模型: \`${
+						selected.provider && selected.model
+							? `${selected.provider}/${selected.model}`
+							: "（默认）"
+					}\`${selected.override ? " (本会话覆盖)" : ""}`,
+					`- 模式/权限: \`${override.preset ?? getCfg().agentPreset}\` / \`${getCfg().permissionMode}\``,
+					`- 连接: \`${status.get().connState}\`${
+						route ? ` · 路由: ${route.chatType} → \`${route.chatId}\`` : ""
+					}`,
+				];
+				await durableReply(name, msg, lines.join("\n"));
+				return true;
+			}
+			case "usage": {
+				const records = userUsage.list();
+				if (records.length === 0) {
+					await durableReply(
+						name,
+						msg,
+						"暂无用量记录（还没有用户向机器人发过消息）。",
+					);
+					return true;
+				}
+				const total = records.reduce((sum, r) => sum + r.inboundMessages, 0);
+				const lines = records.slice(0, 20).map((r) => {
+					const who = r.senderName || r.senderOpenId || r.chatId;
+					const last = new Date(r.lastSeenAt).toLocaleString("zh-CN");
+					return `- ${who} · ${r.inboundMessages} 条 · 最近 ${last}`;
+				});
+				const text = [
+					`**用量统计**（${records.length} 个会话 · 共 ${total} 条入站消息）`,
+					"",
+					...lines,
+					...(records.length > 20 ? ["", "*（仅显示最近 20 个会话）*"] : []),
+				].join("\n");
+				await durableReply(name, msg, text);
+				return true;
+			}
+			case "files": {
+				const key = bridge.conversationKeyFor(msg);
+				const curWs = workspaceForTaskKey(key);
+				const arg = _rawInput.trim();
+				const target = arg ? resolveWorkspaceTarget(arg, curWs) : curWs;
+				try {
+					if (!statSync(target).isDirectory()) throw new Error("不是目录");
+					const entries = readdirSync(target, { withFileTypes: true })
+						.filter((entry) => !entry.name.startsWith("."))
+						.slice(0, 60)
+						.map((entry) =>
+							entry.isDirectory() ? `📁 ${entry.name}/` : `📄 ${entry.name}`,
+						);
+					await durableReply(
+						name,
+						msg,
+						[
+							`**${target}**`,
+							"",
+							...(entries.length > 0 ? entries : ["（空目录）"]),
+						].join("\n"),
+					);
+				} catch (err) {
+					await durableReply(
+						name,
+						msg,
+						`无法读取目录 \`${target}\`: ${
+							err instanceof Error ? err.message : String(err)
+						}`,
+						{ status: "error" },
+					);
+				}
 				return true;
 			}
 			default:
@@ -1931,7 +2732,24 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		ctx: bridge,
 		commands: dshCommands,
 		bridgeHandler,
+		commandProgress: commandPanelSync,
 	});
+
+	/**
+	 * Form values of a `card.action.trigger` callback.
+	 *
+	 * Feishu's v2 callback body carries them at `action.form_value` — SNAKE_CASE,
+	 * per the official form-container docs — while this bridge used to read
+	 * `action.formValue`. Neither the SDK nor the transport normalizes the key,
+	 * so the camelCase read silently yielded undefined and every form (新建文件夹,
+	 * 重命名, 多选问卷) behaved as if the user had submitted nothing. Accept both
+	 * spellings: older SDK builds and hand-built payloads may still use camelCase.
+	 */
+	const formValuesOf = (payload: unknown): Record<string, unknown> | undefined => {
+		const action = (payload as { action?: Record<string, unknown> } | undefined)?.action;
+		const raw = action?.form_value ?? action?.formValue;
+		return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : undefined;
+	};
 
 	// Card action routing (schema 2.0 behaviors:[{type:"callback",value}]):
 	// a button click arrives as card.action.trigger with the op value.
@@ -1944,6 +2762,10 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			};
 			const value = raw.action?.value ?? {};
 			const op = typeof value.op === "string" ? value.op : "";
+			const panelCardId =
+				typeof value._panel_card_id === "string"
+					? value._panel_card_id
+					: "";
 			logger.info(`card action data: ${JSON.stringify(raw).slice(0, 600)}`);
 			const chatId =
 				(raw as { context?: { open_chat_id?: string } }).context
@@ -1954,6 +2776,352 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				"";
 			const messageId = raw.message?.message_id ?? "";
 			if (!op) return;
+			// 网站预览 (site:*): 复用路由里的会话键或其会话根，刷新/停止隧道，
+			// 并原地回发新卡片（链接可能已变）。
+			if (op.startsWith("site:")) {
+				const siteKey =
+					routeStore.all().find((r) => r.chatId === chatId)?.sessionKey ??
+					(chatId.startsWith("oc_") ? `p2p:${chatId}` : `p2p:${chatId}`);
+				const candidates: string[] = [
+					siteKey,
+					siteKey.split("#")[0] ?? siteKey,
+					chatId,
+				];
+				const entry = candidates
+					.map((candidate) => sitePreviews.get(candidate))
+					.find(Boolean);
+				if (op === "site:refresh") {
+					if (!entry) {
+						await sender.sendText(chatId, "当前没有进行中的预览。");
+						return;
+					}
+					const refreshed = await sitePreviews.refresh(entry.convKey);
+					await sender.sendCard(
+						chatId,
+						sitePreviewCard({
+							title: refreshed.title,
+							publicUrl: refreshed.publicUrl,
+							debugUrl: refreshed.debugUrl,
+							origin: refreshed.target,
+							label: refreshed.label,
+							action: "刷新",
+							expiresAt: refreshed.expiresAt,
+						}),
+					);
+					return;
+				}
+				if (op === "site:stop") {
+					for (const candidate of candidates) sitePreviews.stop(candidate);
+					await sender.sendText(chatId, "🛑 预览已关闭，链接失效。");
+					return;
+				}
+			}
+			// 任务列表 (tasks:*): 运行中优先，原地切换/停止；切换后简报现状，
+			// 运行中的任务把输出续在它自己的卡片里。
+			if (op.startsWith("tasks:")) {
+				const tasksKey = conversationKeyOf(
+					routeStore.all().find((r) => r.chatId === chatId)?.sessionKey ??
+						`p2p:${chatId}`,
+				);
+				const renderTaskCard = async (card: unknown): Promise<void> => {
+					if (panelCardId) await commandPanelSync.replace(panelCardId, "tasks", card);
+					else await sender.sendCard(chatId, card);
+				};
+				const renderTaskList = async (note?: string): Promise<void> => {
+					await renderTaskCard(
+						taskListCard({
+							tasks: await taskRowsFor(tasksKey),
+							workspace: workspaceFor(tasksKey),
+							...(note ? { note } : {}),
+						}),
+					);
+				};
+				/** Row for an id that the listing may no longer contain. */
+				const taskRowFor = async (taskId: string): Promise<TaskRow> =>
+					(await taskRowsFor(tasksKey)).find((row) => row.taskId === taskId) ?? {
+						taskId,
+						seq: taskRegistry.taskSeqOf(taskId),
+						status: "stopped",
+						active: false,
+						lastActivityAt: Date.now(),
+					};
+				if (op === "tasks:list") {
+					await renderTaskList();
+					return;
+				}
+				if (op === "tasks:exit") {
+					if (panelCardId) {
+						await commandPanelSync.collapse(panelCardId, "tasks", "已退出任务列表");
+					} else {
+						await sender.sendText(chatId, "已退出任务列表。");
+					}
+					return;
+				}
+				if (op === "tasks:new") {
+					const task = conversations.createTask(tasksKey);
+					await renderTaskCard(
+						await taskBriefingFor(
+							tasksKey,
+							await taskRowFor(task.id),
+							`已开启任务 #${task.seq}：下一条消息发到这里`,
+						),
+					);
+					return;
+				}
+				if (op.startsWith("tasks:switch:")) {
+					const taskId = decodeOpPath(op.slice("tasks:switch:".length));
+					try {
+						const { row, note } = await switchToTaskRow(
+							tasksKey,
+							await taskRowFor(taskId),
+						);
+						await renderTaskCard(await taskBriefingFor(tasksKey, row, note));
+					} catch (err) {
+						await renderTaskList(
+							`切换失败：${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
+					return;
+				}
+				if (op.startsWith("tasks:open:")) {
+					const sessionId = decodeOpPath(op.slice("tasks:open:".length));
+					const known = (await taskRowsFor(tasksKey)).find(
+						(row) => row.sessionId === sessionId,
+					);
+					try {
+						const { row, note } = await switchToTaskRow(
+							tasksKey,
+							known ?? {
+								sessionId,
+								seq: 0,
+								status: "stopped",
+								active: false,
+								historical: true,
+								lastActivityAt: Date.now(),
+							},
+						);
+						await renderTaskCard(await taskBriefingFor(tasksKey, row, note));
+					} catch (err) {
+						await renderTaskList(
+							`接管失败：${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
+					return;
+				}
+				if (op.startsWith("tasks:stop:")) {
+					const taskId = decodeOpPath(op.slice("tasks:stop:".length));
+					await conversations.stopTask(tasksKey, taskId);
+					await renderTaskCard(
+						await taskBriefingFor(tasksKey, await taskRowFor(taskId), "已发送停止请求"),
+					);
+					return;
+				}
+				if (op.startsWith("tasks:refresh:")) {
+					const taskId = decodeOpPath(op.slice("tasks:refresh:".length));
+					await renderTaskCard(await taskBriefingFor(tasksKey, await taskRowFor(taskId)));
+					return;
+				}
+				return;
+			}
+			// 对话管理 (manage:*): one panel rendered IN PLACE. Every branch
+			// updates the same card, so browsing sessions never floods the chat,
+			// and the exit button folds the panel instead of leaving it hanging.
+			if (op.startsWith("manage:")) {
+				const manageKey =
+					routeStore.all().find((r) => r.chatId === chatId)?.sessionKey ??
+					`p2p:${chatId}`;
+				const current = currentSessionFor(manageKey);
+				const renderManage = async (card: unknown): Promise<void> => {
+					if (panelCardId) await commandPanelSync.replace(panelCardId, "manage", card);
+					else await sender.sendCard(chatId, card);
+				};
+				const renderList = async (note?: string): Promise<void> => {
+					await renderManage(
+						sessionManageCard({
+							sessions: await manageRowsFor(manageKey),
+							currentSessionId: current,
+							...(note ? { note } : {}),
+						}),
+					);
+				};
+				/** Row for the detail/ops views; an unlisted id still renders. */
+				const rowFor = async (id: string): Promise<ManageableSession> => {
+					const rows = await manageRowsFor(manageKey);
+					const found = rows.find((row) => row.id === id);
+					if (found) return found;
+					const alias = sessionAliases.get(id);
+					return {
+						id,
+						createdAt: Date.now(),
+						...(alias ? { alias } : {}),
+						cwd: workspaceFor(manageKey),
+					};
+				};
+				const renderDetail = async (id: string, note?: string): Promise<void> => {
+					await renderManage(
+						sessionManageDetailCard({
+							session: await rowFor(id),
+							currentSessionId: current,
+							...(note ? { note } : {}),
+						}),
+					);
+				};
+				const formValue = (): Record<string, unknown> | undefined =>
+					(raw as { action?: { formValue?: Record<string, unknown> } }).action?.formValue;
+				if (op === "manage:list") {
+					await renderList();
+					return;
+				}
+				if (op === "manage:exit") {
+					if (panelCardId) {
+						await commandPanelSync.collapse(panelCardId, "manage", "已退出对话管理");
+					} else {
+						await sender.sendText(chatId, "已退出对话管理。");
+					}
+					return;
+				}
+				if (op.startsWith("manage:pick:")) {
+					await renderDetail(decodeOpPath(op.slice("manage:pick:".length)));
+					return;
+				}
+				if (op.startsWith("manage:rename:submit:")) {
+					const id = decodeOpPath(op.slice("manage:rename:submit:".length));
+					try {
+						const alias = sessionAliases.set(id, String(formValue()?.alias ?? ""));
+						// A LIVE session also gets the REAL DSH title — the host's
+						// title service refuses a session that is not in its store,
+						// which is exactly why historical ones use the bridge alias.
+						const live = (ctxGet("sessions") as { get?(id: string): unknown } | undefined)?.get?.(id);
+						const titleService = ctxGet("sessionTitle") as
+							| { rename?(session: unknown, title: string): unknown }
+							| undefined;
+						if (live && titleService?.rename) {
+							try {
+								titleService.rename(live, alias);
+							} catch (err) {
+								logger.warn(
+									`manage: DSH title rename failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
+								);
+							}
+						}
+						logger.info(`manage: renamed ${id} to 「${alias}」`);
+						await renderDetail(id, `已重命名为「${alias}」`);
+					} catch (err) {
+						await sender.sendText(
+							chatId,
+							`重命名失败：${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
+					return;
+				}
+				if (op.startsWith("manage:rename:")) {
+					const id = decodeOpPath(op.slice("manage:rename:".length));
+					await renderManage(sessionRenameCard({ session: await rowFor(id) }));
+					return;
+				}
+				if (op.startsWith("manage:delete:confirm:")) {
+					const id = decodeOpPath(op.slice("manage:delete:confirm:".length));
+					try {
+						const removed = await deleteSession(sessionAdminDeps(), id);
+						sessionAliases.clear(id);
+						logger.info(`manage: deleted session ${id} (${removed.dir})`);
+						await renderList(`已删除会话「${id}」`);
+					} catch (err) {
+						await renderDetail(
+							id,
+							`删除失败：${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
+					return;
+				}
+				if (op === "manage:delete:cancel") {
+					await renderList("已取消删除");
+					return;
+				}
+				if (op.startsWith("manage:delete:")) {
+					const id = decodeOpPath(op.slice("manage:delete:".length));
+					await renderManage(sessionDeleteConfirmCard({ session: await rowFor(id) }));
+					return;
+				}
+				if (op.startsWith("manage:move:to:")) {
+					const [rawId = "", rawTarget = ""] = op
+						.slice("manage:move:to:".length)
+						.split("|");
+					const id = decodeOpPath(rawId);
+					try {
+						const moved = moveSessionToProject(
+							sessionAdminDeps(),
+							id,
+							decodeOpPath(rawTarget),
+						);
+						logger.info(`manage: migrated ${id} -> ${moved.to} (cwd ${moved.cwd})`);
+						await renderDetail(id, `已迁移到 \`${moved.cwd}\``);
+					} catch (err) {
+						await renderDetail(
+							id,
+							`迁移失败：${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
+					return;
+				}
+				if (op.startsWith("manage:move:submit:")) {
+					const id = decodeOpPath(op.slice("manage:move:submit:".length));
+					const target = String(formValue()?.path ?? "").trim();
+					try {
+						if (!target) throw new Error("目标路径不能为空");
+						if (!isAbsoluteAny(target)) throw new Error("请填写绝对路径");
+						const moved = moveSessionToProject(sessionAdminDeps(), id, target);
+						logger.info(`manage: migrated ${id} -> ${moved.to} (cwd ${moved.cwd})`);
+						await renderDetail(id, `已迁移到 \`${moved.cwd}\``);
+					} catch (err) {
+						await renderDetail(
+							id,
+							`迁移失败：${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
+					return;
+				}
+				if (op.startsWith("manage:move:")) {
+					const id = decodeOpPath(op.slice("manage:move:".length));
+					await renderManage(
+						sessionMoveCard({
+							session: await rowFor(id),
+							targets: listProjectCwds(sessionAdminDeps()),
+						}),
+					);
+					return;
+				}
+				if (op.startsWith("manage:resume:")) {
+					const id = decodeOpPath(op.slice("manage:resume:".length));
+					// Hand off to the /resume flow, reusing THIS card as its panel.
+					const knownRoute = routeStore.all().find((r) => r.chatId === chatId);
+					const pseudoMessageId = messageId
+						? `${messageId}#manage-resume`
+						: `card#${Date.now()}`;
+					if (panelCardId) {
+						commandPanelSync.adopt(
+							chatId,
+							`bridge:resume:${pseudoMessageId}`,
+							panelCardId,
+							"resume",
+						);
+					}
+					await bridgeHandler("resume", encodeURIComponent(id), {
+						messageId: pseudoMessageId,
+						chatId,
+						chatType: knownRoute?.chatType === "group" ? "group" : "p2p",
+						chatMode: knownRoute?.chatType === "group" ? "group_all" : "p2p",
+						senderOpenId: chatId,
+						msgType: "interactive",
+						content: "",
+						text: "",
+						mentions: [],
+						timestamp: Date.now(),
+					});
+					return;
+				}
+				return;
+			}
 			// op may be "name" (bare command) or "name:input" (picker callback).
 			// Single-select answer: "uqa:<questionId>:<optionIndex>".
 			// Multi-select answer: form submit op "uqam:<questionId>" — the
@@ -1965,8 +3133,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				if (pending) {
 					clearTimeout(pending.timer);
 					pendingQuestions.delete(questionId);
-					const form = (raw as { action?: { formValue?: Record<string, unknown> } })
-						.action?.formValue;
+					const form = formValuesOf(raw);
 					const answer = form?.answer;
 					const selectedValues = Array.isArray(answer)
 						? answer.map((v) => String(v))
@@ -2102,11 +3269,131 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				}
 				return;
 			}
+			// ---- workspace browser (single card, in-place streaming) -----------
+			// Every navigation re-renders the SAME CardKit entity through
+			// `_panel_card_id`, so browsing never posts another message.
+			if (op.startsWith("ws:")) {
+				const wsKey =
+					routeStore.all().find((r) => r.chatId === chatId)?.sessionKey ??
+					(chatId ? `dm:${chatId}` : "");
+				if (!wsKey) return;
+				const renderCard = async (card: unknown): Promise<void> => {
+					if (panelCardId) {
+						await commandPanelSync.replace(panelCardId, "workspace", card);
+					} else {
+						await sender.sendCard(chatId, card);
+					}
+				};
+				const renderBrowser = async (path: string): Promise<void> => {
+					await renderCard(buildWorkspaceBrowserCard(wsKey, path));
+				};
+				const renderError = async (title: string, err: unknown): Promise<void> => {
+					await renderCard(
+						markdownCard(
+							`**${title}**\n\n${err instanceof Error ? err.message : String(err)}`,
+							{ header: "工作区", accent: false },
+						),
+					);
+				};
+				/** Isolation guard: with isolation on, browsing stays in the subtree. */
+				const insideIsolation = (target: string): boolean =>
+					!getCfg().workspaceIsolation ||
+					isInsideWorkspace(isolationRootFor(wsKey), target);
+				const navigate = async (target: string): Promise<void> => {
+					if (!insideIsolation(target)) {
+						await renderError(
+							"已开启用户隔离",
+							`只能在自己的工作区（\`${isolationRootFor(wsKey)}\`）内浏览`,
+						);
+						return;
+					}
+					await renderBrowser(target);
+				};
+				if (op.startsWith("ws:cd:")) {
+					await navigate(decodeOpPath(op.slice("ws:cd:".length)));
+					return;
+				}
+				if (op.startsWith("ws:up:")) {
+					await renderBrowser(decodeOpPath(op.slice("ws:up:".length)));
+					return;
+				}
+				if (op.startsWith("ws:back:")) {
+					await renderBrowser(decodeOpPath(op.slice("ws:back:".length)));
+					return;
+				}
+				if (op.startsWith("ws:mk:submit:")) {
+					const parent = decodeOpPath(op.slice("ws:mk:submit:".length));
+					const form = formValuesOf(raw);
+					try {
+						const folderName = sanitizeDirectoryName(String(form?.name ?? ""));
+						const target = join(parent, folderName);
+						if (existsSync(target)) throw new Error("该目录已存在");
+						mkdirSync(target, { recursive: false });
+						// Re-render the parent: the new folder shows up in the list,
+						// which doubles as the confirmation (no extra message).
+						await renderBrowser(parent);
+					} catch (err) {
+						await renderError("新建文件夹失败", err);
+					}
+					return;
+				}
+				if (op.startsWith("ws:mk:")) {
+					const parentPath = decodeOpPath(op.slice("ws:mk:".length));
+					await renderCard(
+						workspaceNewFolderCard({ parentPath }),
+					);
+					return;
+				}
+				if (op.startsWith("ws:pick:")) {
+					const target = decodeOpPath(op.slice("ws:pick:".length));
+					try {
+						if (!statSync(target).isDirectory()) throw new Error("不是目录");
+						if (!insideIsolation(target)) {
+							throw new Error(
+								`已开启用户隔离：只能切换到自己的目录（${isolationRootFor(wsKey)}）下`,
+							);
+						}
+						// Same semantics as `/workspace <path>`: scope the switch to
+						// THIS conversation and rotate (never dispose) so the GUI row
+						// survives and the next message opens under the new cwd.
+						convCfg.set(wsKey, {
+							workspaceRoot: target,
+							activeSessionId: undefined,
+						});
+						await conversations?.rotate(wsKey);
+						if (panelCardId) {
+							await commandPanelSync.collapse(
+								panelCardId,
+								"workspace",
+								`工作区已切换: ${target}（下一条消息在新工作区生效）`,
+							);
+						} else {
+							await sender.sendText(chatId, `工作区已切换: ${target}`);
+						}
+					} catch (err) {
+						await renderError("切换失败", err);
+					}
+					return;
+				}
+				if (op === "ws:cancel") {
+					if (panelCardId) {
+						await commandPanelSync.collapse(
+							panelCardId,
+							"workspace",
+							"已取消，保持原工作区",
+						);
+					} else {
+						await sender.sendText(chatId, "已取消，保持原工作区。");
+					}
+					return;
+				}
+				return;
+			}
 			if (op.startsWith("goal:tpl:")) {
 				const tpl = op.slice("goal:tpl:".length);
 				const knownRoute = routeStore.all().find((r) => r.chatId === chatId);
 				const sessionKey = knownRoute?.sessionKey ?? (chatId ? `dm:${chatId}` : "");
-				const wsRoot = convCfg.get(sessionKey).workspaceRoot ?? (getCfg().workspaceRoot || process.cwd());
+				const wsRoot = workspaceForTaskKey(sessionKey);
 				let obj = "构建工程并运行全量测试验证";
 				if (tpl === "fix") obj = "诊断并修复当前工程中的已知问题与测试失败";
 				else if (tpl === "refactor") obj = "重构核心模块并补齐单元测试与文档";
@@ -2159,6 +3446,14 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				mentions: [],
 				timestamp: Date.now(),
 			};
+			if (panelCardId) {
+				commandPanelSync.adopt(
+					chatId,
+					`bridge:${cmd}:${pseudo.messageId}`,
+					panelCardId,
+					cmd,
+				);
+			}
 			await bridgeHandler(cmd, arg, pseudo);
 		} catch (err) {
 			logger.error(`card action failed: ${String(err)}`);
@@ -2213,10 +3508,19 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	const turnDelivered = new Set<string>();
 	const conversations = createConversationManager({
 		backend,
+		registry: taskRegistry,
 		maxSessions: getCfg().maxSessions,
 		idleTtlMs: getCfg().sessionIdleTtlMs,
 		logger,
+		// The conversation-level "current session" mirrors the ACTIVE task.
+		onActiveSessionId: (key, sessionId) => {
+			convCfg.set(key, { activeSessionId: sessionId });
+		},
+		// `key` below is the TASK id (`dm:oc_x#2`): per-task FIFO, per-task
+		// watchdog and per-task streaming all key off it, while the inbound WAL
+		// and the route table stay conversation-scoped (see conversationKey).
 		onEvent: (key, event) => {
+			const conversationKey = conversationKeyOf(key);
 			void forwarder
 				.onSessionEvent(key, event)
 				.catch((e) => logger.warn(`forwarder: ${String(e)}`));
@@ -2252,15 +3556,32 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				turnSupervisor.disarm(key);
 				streamHandles.delete(key);
 				const reason = event.reason;
+				const rescuedFinal = String(event.finalText ?? "").trim();
+				const noOutput =
+					!turnDelivered.has(key) &&
+					(rescuedFinal === "" || rescuedFinal === "No response.");
 				// "aborted" is user cancellation via /stop or supervisor cancel — NOT an unhandled failure.
 				// Do not emit error diagnostic or reset session on "aborted".
 				const silent =
-					!turnDelivered.has(key) &&
+					noOutput &&
 					(reason === "rejected" ||
 						reason === "failed" ||
 						reason === "error");
 				turnDelivered.delete(key);
-				if (silent && backend.consumeImageRetryGrace?.(key)) {
+				const imageRetryInFlight =
+					silent && backend.consumeImageRetryGrace?.(key);
+				if (noOutput && !imageRetryInFlight) {
+					// A terminal no-output turn must never remain replayable: doing so
+					// caused old prompts/images to surface minutes later when Web UI or
+					// a restart woke replay. Settle the exact FIFO request as failed.
+					// The WAL is CONVERSATION-scoped (one request queue per chat).
+					inboundWal.failOldest(conversationKey);
+					status.refreshCounters({
+						inboundPending: inboundWal.pendingReplays().length,
+						inboundFailed: inboundWal.failedCount(),
+					});
+				}
+				if (imageRetryInFlight) {
 					// An image-degrade retry (non-vision model) is in flight:
 					// its turn/start already landed, so this silent turn/end
 					// belongs to the ORIGINAL image turn. Let the retry answer.
@@ -2291,6 +3612,29 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 							)
 							.catch(() => undefined);
 					}
+				}
+				if (
+					noOutput &&
+					!imageRetryInFlight &&
+					reason !== "aborted" &&
+					reason !== "cancelled"
+				) {
+					// The observed failure mode is sticky: later followups are accepted
+					// but the same DSH agent never emits again. /new fixes it because it
+					// rotates the agent; do that automatically after the error card has
+					// consumed this final event. `key` here is a TASK key, and rotate()
+					// MINTS a task — passing the task key created a NESTED group
+					// (`dm:oc_x#1` → `dm:oc_x#1#1`) that no message can ever route to:
+					// an empty conversation the panels list but nothing can delete.
+					// Normalize to the conversation first.
+					queueMicrotask(() => {
+						const conversationKey = conversationKeyOf(key);
+						void conversations.rotate(conversationKey).catch((err) =>
+							logger.warn(
+								`automatic failed-turn rotation for ${conversationKey}: ${String(err)}`,
+							),
+						);
+					});
 				}
 			}
 		},
@@ -2750,11 +4094,18 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		return { connState: status.get().connState };
 	};
 
+	// ---- site preview manager ----------------------------------------------------
+	const sitePreviews = createSitePreviewManager({
+		stateDir: stateDir(),
+		logger,
+	});
+
 	// ---- tools ------------------------------------------------------------------
 	ctx.tools.register(
 		defineTool({
 			name: "lark_send_local_file",
-			description: "Send a local file or image to the current Feishu chat.",
+			description:
+				"Send a local file or image to the current Feishu chat. Feishu-only: it needs the session to be bound to a Feishu conversation, so it fails in the DSH Web GUI.",
 			parameters: {
 				path: {
 					type: "string",
@@ -2774,21 +4125,16 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				render: (_args, value) => [{ type: "text", text: value as string }],
 			},
 			async execute(args, exec) {
-				// Resolve the requesting conversation FIRST: exec.agent.id is the
-				// bridge session id (lark-link:dm:ou_x:nonce). The session id
-				// carries the per-run nonce suffix while route keys do not —
-				// prefer the backend reverse map, else strip the trailing nonce.
+				// Resolve the requesting conversation FIRST — see routeForSessionId.
 				const sessionId = (exec as { agent?: { id?: string } }).agent?.id ?? "";
 				// The agent's workspace is its conversation's workspace (per-key
 				// override ?? config.workspaceRoot; may differ from the dsh process
 				// cwd after /workspace) — resolve relative paths against it and
 				// whitelist it. Using process.cwd() wrongly rejects files the agent
 				// just created in its workspace.
-				const convKeyForWs =
-					bridge.backend?.keyForSessionId?.(sessionId) ?? sessionId;
-				const workspaceRoot =
-					convCfg.get(convKeyForWs).workspaceRoot ??
-					(getCfg().workspaceRoot || process.cwd());
+				const workspaceRoot = workspaceForTaskKey(
+					conversationKeyForSessionId(sessionId),
+				);
 				// GH #7: drive-letter paths are absolute too, and containment
 				// must use relative() — startsWith("/") joined a Windows
 				// absolute path under the root and then always rejected it.
@@ -2797,15 +4143,12 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 					workspaceRoot,
 				);
 				if (!inWorkspace) return "拒绝: 路径不在工作区内";
-				const prefix = "lark-link:";
-				const backendKey = bridge.backend?.keyForSessionId?.(sessionId);
-				const key =
-					backendKey ??
-					(sessionId.startsWith(prefix)
-						? sessionId.slice(prefix.length).replace(/:[a-z0-9]{8,}$/, "")
-						: sessionId);
-				const route = routeStore.get(key);
-				if (!route) return "错误: 无法定位当前飞书会话";
+				const route = routeForSessionId(sessionId);
+				// No Feishu conversation means there is nowhere to send a file —
+				// say WHY instead of the generic "cannot locate".
+				if (!route)
+					return "错误: 当前会话未绑定飞书对话，无法发送文件（请在飞书里对我说）";
+				const key = route.sessionKey;
 				const client = getLarkClient();
 				if (!client) return "错误: lark 客户端未就绪";
 				// Feishu image upload only accepts raster formats — non-raster
@@ -2856,9 +4199,72 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 					isImage ? "image" : "file",
 				);
 				return `已发送 ${args.path}`;
-			},
-		}),
-	);
+				},
+				}),
+				);
+				ctx.tools.register(
+				defineTool({
+				name: "lark_publish_site",
+				description:
+					"Publish a webpage/game/front-end artifact as a TEMPORARY public link the user can open on their phone, and deliver a Feishu site card. Provide ONE of: url (an http server already running, e.g. a dev server), port (its port), or dir (a built static directory — served by the bridge). The bridge owns the tunnel lifecycle: same target reuses the previous link, a dead tunnel is refreshed with a new link, a different target replaces the old one. Links expire after ~2h. Works from ANY session; the site card is only delivered when the session is bound to a Feishu chat — otherwise use the returned link in your reply.",
+				parameters: {
+					url: { type: "string", description: "http(s) URL already reachable from this host" },
+					port: { type: "number", description: "port of an already-running local server" },
+					dir: { type: "string", description: "absolute path of a static directory to serve (index.html)" },
+					title: { type: "string", description: "optional display title" },
+				},
+				output: {
+					schema: { type: "string" },
+					render: (_args, value) => [{ type: "text", text: value as string }],
+				},
+				async execute(args, exec) {
+					const sessionId = (exec as { agent?: { id?: string } }).agent?.id ?? "";
+					// A Feishu route is OPTIONAL here: publishing a public link is
+					// useful from the DSH Web GUI too, and it must still work for a
+					// Feishu task whose reverse-map entry is gone (resumed task /
+					// disposed idle agent). Only the CARD needs a chat.
+					const route = routeForSessionId(sessionId);
+					const convKey =
+						route?.sessionKey ??
+						(conversationKeyForSessionId(sessionId) || sessionId);
+					let result;
+					try {
+						result = await sitePreviews.publish({
+							convKey,
+							...(route?.chatId ? { chatId: route.chatId } : {}),
+							url: args.url,
+							port: typeof args.port === "number" ? args.port : undefined,
+							dir: typeof args.dir === "string" ? args.dir : undefined,
+							title: typeof args.title === "string" ? args.title : undefined,
+						});
+					} catch (err) {
+						return `错误: ${err instanceof Error ? err.message : String(err)}`;
+					}
+					let delivery = "当前会话未绑定飞书对话（如 DSH Web GUI），未发卡片；";
+					if (route) {
+						try {
+							await sender.sendCard(
+								route.chatId,
+								sitePreviewCard({
+									title: result.title,
+									publicUrl: result.publicUrl,
+									debugUrl: result.debugUrl,
+									origin: result.target,
+									label: result.label,
+									action: result.action,
+									expiresAt: result.expiresAt,
+								}),
+							);
+							delivery = "网站卡片已发给用户；";
+						} catch (err) {
+							logger.warn(`site preview card send failed: ${err instanceof Error ? err.message : String(err)}`);
+							delivery = "卡片发送失败；";
+						}
+					}
+					return `已发布（${result.action}）: ${result.publicUrl}（调试 ${result.debugUrl}，约 2 小时有效）。${delivery}把链接也写进回复。`;
+				},
+				}),
+				);
 	ctx.tools.register(
 		defineTool({
 			name: "lark_config_get",
@@ -3285,7 +4691,8 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				role: "system",
 				content: [
 					"你正在通过飞书/Lark 桥接与用户对话。",
-					"可用工具: lark_send_local_file（发送本地文件到当前飞书会话）、lark_config_get（读取桥配置）。",
+					"可用工具: lark_send_local_file（发送本地文件到当前飞书会话）、lark_publish_site（把网页/游戏/前端产物发布成临时公网链接并给用户发网站卡片）、lark_config_get（读取桥配置）。",
+					"需要让用户临时查看网页/游戏/前端产物时，调用 lark_publish_site：dev server 跑起来后传 port=<端口>；纯静态产物传 dir=<构建产物目录>。工具会自动管理隧道生命周期（相同目标自动复用旧链接）并把网站卡片发给用户；不要自己拼公网链接，也不要重复发布相同目标。",
 					"回复要简洁；长输出会自动流式呈现给用户。",
 				].join("\n"),
 			}),
@@ -3323,6 +4730,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		return async () => {
 			clearInterval(sweep);
 			stopMediaSweeper();
+			sitePreviews.stopAll();
 			await stopBridge();
 		};
 	});

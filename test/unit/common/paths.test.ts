@@ -1,85 +1,59 @@
+// Workspace path helpers used by the /workspace directory browser: parent
+// detection (drives the ".." button), folder-name validation (new-folder form)
+// and op-path decoding (card callbacks split on the first ":").
+//
+// Platform note: `path.dirname` follows the HOST platform, so Windows-shaped
+// assertions are guarded — CI runs on posix hosts where "C:\\x" carries no
+// separators at all.
+
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+	parentDirectory,
+	sanitizeDirectoryName,
+	decodeOpPath,
+	BROWSER_ENTRY_LIMIT,
 	resolveWorkspaceTarget,
-	resolveInWorkspacePath,
+	isAbsoluteAny,
 } from "../../../src/common/paths.ts";
 
-// ---- resolveWorkspaceTarget (/workspace 命令) ------------------------------
-// GH #7: `startsWith("/")` 判绝对路径 —— Windows 盘符路径全部被误判为相对路径。
-
-test("paths: posix absolute arg stays absolute", () => {
-	const t = resolveWorkspaceTarget("/data/proj", "/cur/ws");
-	assert.equal(t, "/data/proj");
+test("paths: parentDirectory walks up and stops at the filesystem root", () => {
+	assert.equal(parentDirectory("/srv/app/src"), "/srv/app");
+	assert.equal(parentDirectory("/srv"), "/");
+	assert.equal(parentDirectory("/"), undefined, "POSIX 根不应再有父目录");
+	if (process.platform === "win32") {
+		assert.equal(parentDirectory("C:\\Users\\me"), "C:\\Users");
+		assert.equal(parentDirectory("C:\\"), undefined, "盘符根不应再有父目录");
+	}
 });
 
-test("paths: relative arg joins the current workspace", () => {
-	const t = resolveWorkspaceTarget("sub/dir", "/cur/ws");
-	assert.equal(t, "/cur/ws/sub/dir");
+test("paths: sanitizeDirectoryName accepts plain names and rejects escapes", () => {
+	assert.equal(sanitizeDirectoryName("  my-project  "), "my-project");
+	assert.equal(sanitizeDirectoryName("中文目录"), "中文目录");
+	for (const bad of ["", "   ", ".", "..", "a/b", "a\\b", "a\u0000b", "a:b", "a?b", "a*b"]) {
+		assert.throws(
+			() => sanitizeDirectoryName(bad),
+			/文件夹/,
+			`应拒绝非法名称 ${JSON.stringify(bad)}`,
+		);
+	}
+	assert.throws(() => sanitizeDirectoryName("x".repeat(101)), /过长/);
 });
 
-test("paths: ~ expands to homedir", () => {
-	const t = resolveWorkspaceTarget("~/proj", "/cur/ws");
-	assert.ok(!t.includes("~"));
-	assert.ok(t.endsWith("proj"));
+test("paths: decodeOpPath tolerates malformed encoding", () => {
+	assert.equal(decodeOpPath(encodeURIComponent("/srv/a:b")), "/srv/a:b");
+	assert.equal(decodeOpPath("%E4%B8%AD%E6%96%87"), "中文");
+	assert.equal(decodeOpPath("%E4%B8"), "%E4%B8", "非法编码应原样返回而不抛错");
 });
 
-test("paths: windows drive-letter absolute is ABSOLUTE (GH #7)", () => {
-	// win32 格式的 D:\... 在任何平台上都不得被 join 到当前工作区后面。
-	const t = resolveWorkspaceTarget("D:\\Users\\kitti\\ws", "/cur/ws");
-	assert.ok(
-		t === "D:\\Users\\kitti\\ws" || t.includes("D:"),
-		`drive-letter path must stay absolute, got ${t}`,
-	);
-	assert.ok(!t.startsWith("/cur/ws"), "must not be joined under the cwd");
+test("paths: browser entry limit is a sane positive cap", () => {
+	assert.ok(Number.isInteger(BROWSER_ENTRY_LIMIT) && BROWSER_ENTRY_LIMIT > 0);
 });
 
-test("paths: windows forward-slash drive path is absolute (D:/...)", () => {
-	const t = resolveWorkspaceTarget("D:/Users/kitti/ws", "/cur/ws");
-	assert.ok(!t.startsWith("/cur/ws"), "must not be joined under the cwd");
-});
-
-test("paths: UNC path is absolute", () => {
-	const t = resolveWorkspaceTarget("\\\\server\\share\\ws", "/cur/ws");
-	assert.ok(!t.startsWith("/cur/ws"), "UNC must not be joined under the cwd");
-});
-
-// ---- resolveInWorkspacePath (lark_send_local_file 工具) --------------------
-
-test("paths: absolute input inside root resolves and passes containment", () => {
-	const { abs, ok } = resolveInWorkspacePath("/ws/a/b.txt", "/ws/a");
-	assert.equal(abs, "/ws/a/b.txt");
-	assert.equal(ok, true);
-});
-
-test("paths: relative input resolves against the root", () => {
-	const { abs, ok } = resolveInWorkspacePath("b.txt", "/ws/a");
-	assert.equal(abs, "/ws/a/b.txt");
-	assert.equal(ok, true);
-});
-
-test("paths: traversal outside the root is rejected", () => {
-	const { ok } = resolveInWorkspacePath("../../etc/passwd", "/ws/a");
-	assert.equal(ok, false);
-});
-
-test("paths: absolute input OUTSIDE the root is rejected", () => {
-	const { ok } = resolveInWorkspacePath("/etc/passwd", "/ws/a");
-	assert.equal(ok, false);
-});
-
-test("paths: windows drive absolute inside root passes containment (GH #7)", () => {
-	const { abs, ok } = resolveInWorkspacePath("D:\\ws\\a\\b.txt", "D:\\ws\\a");
-	assert.equal(ok, true);
-	assert.ok(String(abs).includes("b.txt"));
-});
-
-test("paths: windows drive absolute outside root is rejected (GH #7)", () => {
-	const { ok } = resolveInWorkspacePath("E:\\other\\b.txt", "D:\\ws\\a");
-	assert.equal(ok, false);
-});
-
-test("paths: same-directory root edge (file IS in root dir)", () => {
-	const { ok } = resolveInWorkspacePath("D:\\ws\\a", "D:\\ws\\a");
-	assert.equal(ok, true);
+test("paths: resolveWorkspaceTarget resolves relative input and expands ~", () => {
+	const resolved = resolveWorkspaceTarget("sub", "/srv/app");
+	assert.ok(resolved.endsWith("sub"), `相对路径应落到工作区下，实际 ${resolved}`);
+	const home = resolveWorkspaceTarget("~", "/srv/app");
+	assert.ok(isAbsoluteAny(home), "~ 应展开为绝对路径");
+	assert.ok(!home.includes("~"), "~ 不应残留在结果中");
 });

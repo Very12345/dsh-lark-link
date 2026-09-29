@@ -13,7 +13,7 @@
 // instead of a garbage joined path. Containment uses relative() — prefix
 // string matching breaks on case/separator variance.
 
-import { isAbsolute, join, resolve, relative, win32 } from "node:path";
+import { dirname, isAbsolute, join, resolve, relative, win32 } from "node:path";
 import { homedir } from "node:os";
 
 /** True for a path that is absolute on the CURRENT platform OR Windows-shaped
@@ -48,6 +48,52 @@ export function resolveWorkspaceTarget(arg: string, curWs: string): string {
  * Returns { abs, ok } — ok=false means the path escapes the workspace and
  * must be rejected (拒绝: 路径不在工作区内).
  */
+/** Max sub-directory buttons rendered in one workspace-browser view. */
+export const BROWSER_ENTRY_LIMIT = 40;
+
+/**
+ * Parent directory, or undefined when `p` already IS a filesystem root.
+ * `dirname()` is platform-correct: it maps "/" → "/" on posix and "C:\\" →
+ * "C:\\" (and UNCs to their share root) on Windows, so the browser can offer
+ * ".." exactly while ascending is still possible.
+ */
+export function parentDirectory(p: string): string | undefined {
+	const dir = dirname(p);
+	return dir === p ? undefined : dir;
+}
+
+/**
+ * Validate ONE directory name typed by the user (new-folder form / text form).
+ * Rejects anything that could escape the intended parent or break a path:
+ * separators, "." / "..", control characters, Windows-reserved punctuation and
+ * overlong names. Throws with a user-facing message.
+ */
+export function sanitizeDirectoryName(value: string): string {
+	const name = String(value ?? "").trim();
+	if (!name) throw new Error("文件夹名称不能为空");
+	if (name === "." || name === "..") throw new Error("文件夹名称无效");
+	if (/[\\/]/.test(name)) throw new Error("文件夹名称不能包含路径分隔符");
+	// eslint-disable-next-line no-control-regex
+	if (/[\u0000-\u001f\u007f]/.test(name)) throw new Error("文件夹名称不能包含控制字符");
+	if (/[<>:"|?*]/.test(name)) throw new Error('文件夹名称不能包含 < > : " | ? * 等字符');
+	if (name.length > 100) throw new Error("文件夹名称过长（最多 100 字符）");
+	return name;
+}
+
+/**
+ * Decode a URI-encoded path carried by a card callback op. Card actions split
+ * the op at the FIRST ":" and conversation keys/paths contain colons, so paths
+ * travel encoded; malformed input falls back to the raw value.
+ */
+export function decodeOpPath(value: string): string {
+	const raw = String(value ?? "");
+	try {
+		return decodeURIComponent(raw);
+	} catch {
+		return raw;
+	}
+}
+
 export function resolveInWorkspacePath(
 	p: string,
 	root: string,

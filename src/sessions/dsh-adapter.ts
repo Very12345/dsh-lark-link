@@ -24,6 +24,7 @@ import type {
 	AgentHandle,
 	AttachmentInput,
 } from "./dsh-session-backend.ts";
+import type { TokenUsageSnapshot } from "../common/types.ts";
 
 export interface DshAdapterDeps {
 	ctx: Context;
@@ -148,6 +149,46 @@ function nestedText(value: unknown): string {
 	return "";
 }
 
+/**
+ * Project DSH's `TokenUsage` onto the bridge's harness-agnostic snapshot.
+ *
+ * `assistant/message.usage` is the ONLY place token accounting is recorded —
+ * there is no separate usage event — and DSH omits it when the adapter reported
+ * none. Returning undefined for an empty/missing payload is therefore
+ * deliberate: the card header falls back to its own visible estimate instead of
+ * claiming "0 tok".
+ */
+function tokenUsageOf(value: unknown): TokenUsageSnapshot | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const row = value as Record<string, unknown>;
+	const num = (key: string): number | undefined => {
+		const found = row[key];
+		return typeof found === "number" && Number.isFinite(found) ? found : undefined;
+	};
+	const inputTokens = num("inputTokens");
+	const outputTokens = num("outputTokens");
+	const totalTokens = num("totalTokens");
+	const cacheReadTokens = num("cacheReadTokens");
+	const cacheWriteTokens = num("cacheWriteTokens");
+	const reasoningTokens = num("reasoningTokens");
+	if (
+		inputTokens === undefined &&
+		outputTokens === undefined &&
+		totalTokens === undefined &&
+		cacheReadTokens === undefined
+	) {
+		return undefined;
+	}
+	return {
+		inputTokens: inputTokens ?? 0,
+		outputTokens: outputTokens ?? 0,
+		...(totalTokens !== undefined ? { totalTokens } : {}),
+		...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+		...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+		...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+	};
+}
+
 function toSessionEventOut(ev: SessionEvent): SessionEventOut | undefined {
 	const raw = ev as unknown as { type: string; data?: any };
 	switch (raw.type) {
@@ -168,6 +209,10 @@ function toSessionEventOut(ev: SessionEvent): SessionEventOut | undefined {
 				reasoning: reasoningOf(raw.data?.message?.content),
 				hasToolCalls: Array.isArray(raw.data?.message?.content)
 					&& raw.data.message.content.some((block: { type?: string }) => block?.type === "tool-call"),
+				// Real token accounting travels WITH the step's message (there is
+				// no separate usage event), so it must not be dropped here: the
+				// card header reads it instead of guessing from the stream.
+				usage: tokenUsageOf(raw.data?.usage),
 			};
 		case "turn/end":
 			return { type: "turn/end", reason: raw.data?.reason?.kind ?? "done" };

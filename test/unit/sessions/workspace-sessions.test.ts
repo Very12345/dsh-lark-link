@@ -8,6 +8,8 @@ import {
 	decodeSessionDirName,
 	listWorkspaceSessions,
 	extractTitleFromEvents,
+	extractOverviewFromEvents,
+	resolveSessionsRoot,
 } from "../../../src/sessions/workspace-sessions.ts";
 
 
@@ -36,6 +38,17 @@ test("projectKey: windows drive and UNC paths encode separators the same way", (
 test("projectKey: unsafe characters use the ~XXXX escape", () => {
 	// 空格 (0x20) → ~0020
 	assert.equal(projectKeyOf("/a b"), "--a~0020b--");
+});
+
+test("sessions root: webagent deployment wins when DSH_HOME is absent", () => {
+	assert.equal(
+		resolveSessionsRoot({ WEBAGENT_HOME: "/srv/webagent" }, "/home/test"),
+		join("/srv/webagent", "deepseek-harness", "sessions"),
+	);
+	assert.equal(
+		resolveSessionsRoot({ DSH_HOME: "/srv/dsh", WEBAGENT_HOME: "/ignored" }, "/home/test"),
+		join("/srv/dsh", "sessions"),
+	);
 });
 
 // ---- decodeSessionDirName ----------------------------------------------------
@@ -95,6 +108,76 @@ test("list: service source filters by cwd, excludes subagents, sorts desc", asyn
 	assert.equal(rows[0]!.source, "service");
 });
 
+test("list: DSH v3 persistence snapshots unwrap their header", async () => {
+	const persistence = {
+		async list() {
+			return [
+				{
+					header: {
+						id: "v3-session",
+						createdAt: 3000,
+						cwd: "/ws/proj",
+						agentPreset: "standard",
+					},
+					revision: { opaque: true },
+				},
+			];
+		},
+	};
+	const rows = await listWorkspaceSessions({
+		sessionsRoot: "/nonexistent",
+		cwd: "/ws/proj",
+		persistence,
+	});
+	assert.deepEqual(rows.map((row) => row.id), ["v3-session"]);
+	assert.equal(rows[0]?.preset, "standard");
+});
+
+test("list: DSH v3 read handle supplies title, progress overview, and counts", async () => {
+	let closed = 0;
+	const events = [
+		{
+			type: "user/message",
+			time: 1000,
+			data: { content: [{ type: "text", text: "修复玩家存档系统" }] },
+		},
+		{ type: "tool/call", time: 1500, data: { name: "bash" } },
+		{
+			type: "assistant/message",
+			time: 2000,
+			data: { message: { content: [{ type: "text", text: "已修复读取逻辑，测试通过。" }] } },
+		},
+	];
+	const persistence = {
+		async list() {
+			return [{
+				header: { id: "v3-rich", createdAt: 500, cwd: "/ws/proj" },
+				revision: "r1",
+				eventCount: events.length,
+			}];
+		},
+		async open() {
+			return {
+				async read(offset = 0, length = events.length) {
+					return { events: events.slice(offset, offset + length) };
+				},
+				async close() { closed++; },
+			};
+		},
+	};
+	const [row] = await listWorkspaceSessions({
+		sessionsRoot: "/nonexistent",
+		cwd: "/ws/proj",
+		persistence,
+	});
+	assert.equal(row?.title, "修复玩家存档系统");
+	assert.equal(row?.summary, "已修复读取逻辑，测试通过。");
+	assert.equal(row?.userTurns, 1);
+	assert.equal(row?.toolCalls, 1);
+	assert.equal(row?.lastActivityAt, 2000);
+	assert.equal(closed, 1, "read handle is always closed");
+});
+
 test("list: service source caps to limit", async () => {
 	const persistence = {
 		async list() {
@@ -150,6 +233,16 @@ test("list: scan fallback reads the workspace project dir, decodes ids, sorts by
 	);
 	assert.equal(rows[0]!.source, "scan");
 	assert.ok(rows[0]!.createdAt >= rows[1]!.createdAt);
+	rmSync(root, { recursive: true, force: true });
+});
+
+test("list: scan fallback recognizes the current session.v3 log name", async () => {
+	const root = mkdtempSync(join(tmpdir(), "dsh-ws-list-v3-"));
+	const dir = join(root, projectKeyOf("/ws/proj"), "v3-session");
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "session.v3.jsonl.zstd"), "x");
+	const rows = await listWorkspaceSessions({ sessionsRoot: root, cwd: "/ws/proj" });
+	assert.deepEqual(rows.map((row) => row.id), ["v3-session"]);
 	rmSync(root, { recursive: true, force: true });
 });
 
@@ -213,6 +306,21 @@ test("extractTitleFromEvents: falls back to first human user message when no ses
 		},
 	];
 	assert.equal(extractTitleFromEvents(events), "帮我实现飞书机器人的流式卡片输出");
+});
+
+test("extractOverviewFromEvents: uses latest assistant output as progress summary", () => {
+	const overview = extractOverviewFromEvents([
+		{ type: "user/message", time: 1, data: { content: [{ type: "text", text: "实现地图" }] } },
+		{ type: "tool/call", time: 2, data: { name: "write" } },
+		{ type: "assistant/message", time: 3, data: { message: { content: [{ type: "text", text: "地图已完成并通过测试" }] } } },
+	]);
+	assert.deepEqual(overview, {
+		title: "实现地图",
+		summary: "地图已完成并通过测试",
+		userTurns: 1,
+		toolCalls: 1,
+		lastActivityAt: 3,
+	});
 });
 
 test("list: inspect resolves titles from persistence events", async () => {

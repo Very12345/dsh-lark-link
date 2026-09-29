@@ -79,7 +79,7 @@ export interface RouteRef {
 }
 
 export type EnvelopePayload =
-  | { kind: "text"; text: string; card?: unknown }
+  | { kind: "text"; text: string; card?: unknown; status?: "ok" | "error" }
   | { kind: "card"; card: unknown; text?: string }
   | { kind: "media"; fileKey: string; type: "image" | "file"; caption?: string }
   | { kind: "reaction"; messageId: string; emojiType: string };
@@ -170,6 +170,35 @@ export interface TaskCardState {
   workspacePath?: string;
   isFolded?: boolean;
   lastUpdatedAt?: number;
+}
+
+/**
+ * Token accounting for ONE model call, mirrored from DSH's `TokenUsage`
+ * (@deepseek-ai/dsh-llm) so this module stays free of DSH imports and the
+ * presentation layer never touches harness types.
+ *
+ * Counts are DISJOINT: `inputTokens` is UNCACHED input only; cached input is
+ * reported separately as `cacheReadTokens`/`cacheWriteTokens`, so billed prompt
+ * tokens are the sum of the three input counters.
+ */
+export interface TokenUsageSnapshot {
+  inputTokens: number;
+  outputTokens: number;
+  /** Exact full-call total (prompt + output) when the adapter reported one. */
+  totalTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+}
+
+/** Running token totals rendered in the live card header. */
+export interface TokenTotals {
+  /** Billed tokens: prompt (input + cache read/write) + output. */
+  tokens: number;
+  /** Billed prompt tokens — the cache-hit denominator. */
+  prompt: number;
+  /** Prompt tokens served from cache — the cache-hit numerator. */
+  cacheRead: number;
 }
 
 /** Briefing data for an agent session restored via /resume. */

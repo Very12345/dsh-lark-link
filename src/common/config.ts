@@ -32,13 +32,15 @@ export interface FeishuConfig {
 		printFrequencyMs: number;
 		printStep: number;
 	};
-	/** Reaction receipts: random on inbound (pool excludes DONE), ✅ on completion. */
+	/** Fixed state-mapped reaction receipts (see common/reactions.ts). */
 	reactions: {
 		enabled: boolean;
-		/** Default random pool — only Feishu-valid emoji types. */
-		pool: string[];
-		/** Completion marker (never in the random pool). */
+		/** Inbound receipt — "got it, on it" (OnIt). */
+		receipt: string;
+		/** Completion marker (DONE). */
 		done: string;
+		/** Failure marker (ERROR). */
+		error: string;
 	};
 	/** Inbound media (downloaded Feishu images/files).
 	 * Transient turn artifacts: default root is the OS temp dir with
@@ -89,8 +91,17 @@ export interface FeishuConfig {
 	maxSessions: number;
 	/** Owner allowlist (optional): restrict inbound to these open_ids. Empty = all. */
 	allowlist: string[];
-	/** Bridge agent workspace root (cwd for created sessions). Empty = process.cwd(). */
+	/** Bridge agent workspace root (cwd for created sessions). Empty = process.cwd().
+	 * With `workspaceIsolation` on (default) each user works in
+	 * `<workspaceRoot>/<5-letter hash of their id>` instead of the root itself. */
 	workspaceRoot: string;
+	/**
+	 * Per-user workspace isolation (default true): every user (or group) gets its
+	 * own subtree under workspaceRoot, and /workspace, the browser, /cwd, /files
+	 * and /manage stay inside it — one user can never touch another's files.
+	 * Turn it off only for a single-owner deployment.
+	 */
+	workspaceIsolation: boolean;
 	/** App-scoped model allowlist and default; never changes the host-wide DSH default. */
 	modelAccess: ModelAccessConfig;
 	/**
@@ -121,10 +132,12 @@ export const DEFAULT_CONFIG: FeishuConfig = {
 	},
 	reactions: {
 		enabled: true,
-		// Only Feishu-valid emoji types (FIRE/ROCKET/SUN/WHITE_CHECK_MARK are
-		// invalid → addReaction 231001; Fire is valid, FIRE is not).
-		pool: ["THUMBSUP", "OK", "HEART", "LAUGH", "SMILE", "WOW", "CLAP", "Fire"],
+		// Fixed + meaningful, not a random pick: OnIt = 收到即办, DONE = 完成,
+		// ERROR = 失败. Values must be Feishu-valid emoji_type entries
+		// (case-sensitive: Fire is valid, FIRE is not).
+		receipt: "OnIt",
 		done: "DONE",
+		error: "ERROR",
 	},
 	attachments: {
 		dir: "",
@@ -155,6 +168,7 @@ export const DEFAULT_CONFIG: FeishuConfig = {
 	maxSessions: 32,
 	allowlist: [],
 	workspaceRoot: "",
+	workspaceIsolation: true,
 	modelAccess: {
 		restricted: false,
 		allowedModels: [],
@@ -170,6 +184,7 @@ export const HOT_RELOADABLE: ReadonlyArray<keyof FeishuConfig> = [
 	"groupKeywords",
 	"alsoOnReply",
 	"workspaceRoot",
+	"workspaceIsolation",
 	"agentPreset",
 	"permissionMode",
 	"streaming",

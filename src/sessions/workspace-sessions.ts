@@ -14,6 +14,7 @@
 // Harness-agnostic: the service is injected as a narrow structural interface.
 
 import { existsSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 /** Header-like row of the DSH sessionPersistence service (structural slice). */
@@ -34,14 +35,62 @@ export interface WorkspaceSessionInfo {
 	preset?: string;
 	/** Human-readable session title (if available). */
 	title?: string;
+	/** Compact last-progress preview extracted from persisted messages. */
+	summary?: string;
+	/** Counts shown in the picker overview. */
+	userTurns?: number;
+	toolCalls?: number;
+	/** Last durable event timestamp, when the log exposes one. */
+	lastActivityAt?: number;
+	/** Cheap v3 snapshot count, used to read a bounded tail. */
+	eventCount?: number;
 	source: "service" | "scan";
 }
 
 export interface PersistenceListSource {
-	list(signal?: AbortSignal): Promise<SessionHeaderLike[]>;
+	/**
+	 * DSH <= v2 returned headers directly. DSH v3 returns persistence
+	 * snapshots (`{ header, revision }`). Accept both so the bridge can follow
+	 * the host independently of its session-format generation.
+	 */
+	list(
+		signal?: AbortSignal,
+	): Promise<
+		readonly (
+			| SessionHeaderLike
+			| { readonly header: SessionHeaderLike; readonly revision?: unknown }
+		)[]
+	>;
 	inspect?(id: string, signal?: AbortSignal): Promise<{ meta?: unknown; events?: readonly unknown[] } | undefined>;
 	load?(id: string): Promise<{ header?: unknown; events?: readonly unknown[] } | undefined>;
 	readFrom?(id: string, fromSeq: number): Promise<{ meta?: unknown; events?: readonly unknown[] } | undefined>;
+	open?(
+		id: string,
+		access: "read",
+	): Promise<{
+		read(offset?: number, length?: number): Promise<{ events: readonly unknown[] }>;
+		close(): Promise<void>;
+	}>;
+}
+
+/** Resolve the harness home used by stock DSH and the webagent deployment. */
+export function resolveDshHome(
+	env: NodeJS.ProcessEnv = process.env,
+	home: string = homedir(),
+): string {
+	const explicit = env.DSH_HOME?.trim();
+	if (explicit) return explicit;
+	const webagentHome = env.WEBAGENT_HOME?.trim();
+	if (webagentHome) return join(webagentHome, "deepseek-harness");
+	return join(home, ".dsh");
+}
+
+/** Resolve the session store used by stock DSH and the webagent deployment. */
+export function resolveSessionsRoot(
+	env: NodeJS.ProcessEnv = process.env,
+	home: string = homedir(),
+): string {
+	return join(resolveDshHome(env, home), "sessions");
 }
 
 
@@ -66,39 +115,82 @@ export interface ListWorkspaceSessionsDeps {
  * 2. first user message text (deterministic fallback)
  */
 export function extractTitleFromEvents(events: readonly unknown[]): string | undefined {
-	if (!Array.isArray(events) || events.length === 0) return undefined;
-	// 1. Look for explicit session/title event from the end
-	for (let i = events.length - 1; i >= 0; i--) {
-		const ev = events[i] as { type?: string; data?: { title?: string } };
-		if (ev?.type === "session/title" && ev.data?.title) {
-			const t = ev.data.title.trim();
-			if (t) return t.slice(0, 36);
-		}
-	}
-	// 2. Look for first human text-bearing user message
-	for (let i = 0; i < events.length; i++) {
-		const ev = events[i] as {
-			type?: string;
-			data?: {
-				source?: { kind?: string };
-				content?: Array<{ type?: string; text?: string }>;
-			};
+	return extractOverviewFromEvents(events).title;
+}
+
+export interface SessionOverview {
+	title?: string;
+	summary?: string;
+	userTurns: number;
+	toolCalls: number;
+	lastActivityAt?: number;
+}
+
+const oneLine = (value: string, limit: number): string =>
+	value.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, limit);
+
+const messageText = (event: unknown): string => {
+	const ev = event as {
+		data?: {
+			content?: Array<{ type?: string; text?: string }>;
+			message?: { content?: Array<{ type?: string; text?: string }> };
 		};
-		if (ev?.type === "user/message") {
-			const text = (ev.data?.content ?? [])
-				.filter((b) => b?.type === "text" && typeof b.text === "string")
-				.map((b) => b.text?.trim())
-				.filter(Boolean)
-				.join(" ");
+	};
+	const blocks = ev.data?.message?.content ?? ev.data?.content ?? [];
+	return blocks
+		.filter((block) => block?.type === "text" && typeof block.text === "string")
+		.map((block) => block.text?.trim())
+		.filter(Boolean)
+		.join(" ");
+};
+
+/** Extract a compact picker overview without invoking an LLM. */
+export function extractOverviewFromEvents(events: readonly unknown[]): SessionOverview {
+	let explicitTitle: string | undefined;
+	let firstUser: string | undefined;
+	let lastUser: string | undefined;
+	let lastAssistant: string | undefined;
+	let userTurns = 0;
+	let toolCalls = 0;
+	let lastActivityAt: number | undefined;
+
+	if (!Array.isArray(events) || events.length === 0) {
+		return { userTurns: 0, toolCalls: 0 };
+	}
+	for (const event of events) {
+		const ev = event as {
+			type?: string;
+			time?: number;
+			data?: { title?: string };
+		};
+		if (typeof ev.time === "number") {
+			lastActivityAt = Math.max(lastActivityAt ?? 0, ev.time);
+		}
+		if (ev.type === "session/title" && ev.data?.title) {
+			const title = oneLine(ev.data.title, 36);
+			if (title) explicitTitle = title;
+		} else if (ev.type === "user/message") {
+			const text = messageText(event);
 			if (text) {
-				const clean = text.replace(/^\/[a-zA-Z0-9_-]+\s*/, "").trim();
-				const candidate = clean || text;
-				const oneLine = candidate.replace(/[\r\n\t]+/g, " ").trim();
-				if (oneLine) return oneLine.slice(0, 36);
+				userTurns++;
+				const clean = text.replace(/^\/[a-zA-Z0-9_-]+\s*/, "").trim() || text;
+				firstUser ??= oneLine(clean, 36);
+				lastUser = oneLine(clean, 90);
 			}
+		} else if (ev.type === "assistant/message") {
+			const text = messageText(event);
+			if (text) lastAssistant = oneLine(text, 90);
+		} else if (ev.type === "tool/call") {
+			toolCalls++;
 		}
 	}
-	return undefined;
+	return {
+		...(explicitTitle || firstUser ? { title: explicitTitle ?? firstUser } : {}),
+		...(lastAssistant || lastUser ? { summary: lastAssistant ?? `待处理：${lastUser}` } : {}),
+		userTurns,
+		toolCalls,
+		...(lastActivityAt === undefined ? {} : { lastActivityAt }),
+	};
 }
 
 /**
@@ -145,7 +237,10 @@ export async function listWorkspaceSessions(
 	// Source 1: the persistence service — headers give exact cwd + origin.
 	if (deps.persistence?.list) {
 		try {
-			const headers = await deps.persistence.list();
+			const snapshots = await deps.persistence.list();
+			const headers = snapshots.map((entry) =>
+				"header" in entry ? entry.header : entry,
+			);
 			rows = headers
 				.filter(
 					(h) =>
@@ -156,12 +251,18 @@ export async function listWorkspaceSessions(
 				.sort((a, b) => b.createdAt - a.createdAt)
 				.slice(0, limit)
 				.map<WorkspaceSessionInfo>((h) => {
+					const snapshot = snapshots.find((entry) =>
+						"header" in entry ? entry.header.id === h.id : entry.id === h.id,
+					) as { eventCount?: number } | undefined;
 					const title = deps.titleFor?.(h.id) ?? h.title;
 					return {
 						id: h.id,
 						createdAt: h.createdAt,
 						...(h.agentPreset ? { preset: h.agentPreset } : {}),
 						...(title ? { title } : {}),
+						...(typeof snapshot?.eventCount === "number"
+							? { eventCount: snapshot.eventCount }
+							: {}),
 						source: "service",
 					};
 				});
@@ -175,7 +276,13 @@ export async function listWorkspaceSessions(
 		const dir = join(deps.sessionsRoot, projectKeyOf(deps.cwd));
 		if (existsSync(dir)) {
 			for (const name of readdirSync(dir)) {
-				const log = join(dir, name, "session.jsonl.zstd");
+				const sessionDir = join(dir, name);
+				// Current DSH uses a format-versioned filename. Keep the legacy name
+				// for installations that have not migrated yet.
+				const log = ["session.v3.jsonl.zstd", "session.jsonl.zstd"]
+					.map((filename) => join(sessionDir, filename))
+					.find((candidate) => existsSync(candidate));
+				if (!log) continue;
 				let mtime: number;
 				try {
 					mtime = statSync(log).mtimeMs;
@@ -196,17 +303,30 @@ export async function listWorkspaceSessions(
 	if (deps.persistence && rows.length > 0) {
 		await Promise.allSettled(
 			rows.map(async (row) => {
-				if (row.title) return;
+				let overview: SessionOverview | undefined;
 				if (deps.titleFor) {
 					const t = deps.titleFor(row.id);
-					if (t) {
-						row.title = t;
-						return;
-					}
+					if (t) row.title = t;
 				}
 				try {
 					let events: readonly unknown[] | undefined;
-					if (deps.persistence?.inspect) {
+					if (deps.persistence?.open) {
+						const handle = await deps.persistence.open(row.id, "read");
+						try {
+							const count = row.eventCount;
+							if (typeof count === "number" && count > 240) {
+								const [head, tail] = await Promise.all([
+									handle.read(0, 120),
+									handle.read(Math.max(0, count - 120), 120),
+								]);
+								events = [...head.events, ...tail.events];
+							} else {
+								events = (await handle.read(0, count ?? 400)).events;
+							}
+						} finally {
+							await handle.close();
+						}
+					} else if (deps.persistence?.inspect) {
 						const res = await deps.persistence.inspect(row.id);
 						events = res?.events;
 					} else if (deps.persistence?.load) {
@@ -217,8 +337,12 @@ export async function listWorkspaceSessions(
 						events = res?.events;
 					}
 					if (events) {
-						const extracted = extractTitleFromEvents(events);
-						if (extracted) row.title = extracted;
+						overview = extractOverviewFromEvents(events);
+						row.title ??= overview.title;
+						row.summary = overview.summary;
+						row.userTurns = overview.userTurns;
+						row.toolCalls = overview.toolCalls;
+						row.lastActivityAt = overview.lastActivityAt;
 					}
 				} catch {
 					// best-effort

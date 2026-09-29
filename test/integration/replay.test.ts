@@ -92,9 +92,9 @@ function buildBridge(
     streamFor: () => undefined,
     cfg: () => ({ streamingEnabled: false }),
     onDelivered: (key) => {
-      const route = routeStore.get(key);
-      if (route?.lastMessageId) inboundWal.delivered(route.lastMessageId);
+      const delivered = inboundWal.deliveredOldest(key);
       opts.delivered?.(key);
+      return delivered?.messageId;
     },
   });
   bridge.setForwarder(forwarder);

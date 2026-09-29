@@ -75,6 +75,68 @@ export interface ClientContext extends Context {
 			Component: (props?: unknown) => unknown,
 		): () => void;
 	};
+	/** Legacy client settings-scope service (0.1.6 and older only). */
+	settingsScope?: {
+		bind(spec?: { namespace?: string }): {
+			getSnapshot(): unknown;
+			subscribe(listener: () => void): () => void;
+			set(key: string, value: unknown): unknown;
+		};
+	};
+}
+
+/**
+ * Compatibility shim for the legacy `settingsScope` client service.
+ *
+ * DSH 0.1.7-rc dropped that service (settings are now declared host-side via
+ * `settings.installSection` and rendered by the generic settings UI), but the
+ * WebAgent integration plugin shipped INSIDE webagent-dsh-core 7.4.4 still
+ * injects it — so its client entry parks at
+ * `pending (waiting for service: settingsScope)` and the GUI reports
+ * "1 entry did not activate".
+ *
+ * The adaptation belongs HERE, in our plugin, rather than as a patch to the
+ * vendor's versioned code: supplying the legacy contract lets that entry
+ * activate untouched. It is deliberately READ-ONLY (`writable: false`): the
+ * value the card shows is owned by the profile patch layer
+ * (`webagent-integration.patch.yml` sets the search provider), so there is
+ * nothing for the GUI to write back.
+ *
+ * `bind()` must hand back a STABLE snapshot object — the vendor card feeds it
+ * to `React.useSyncExternalStore`, which re-renders forever on a new reference.
+ */
+function installLegacySettingsScope(ctx: ClientContext): void {
+	const compat = ctx as unknown as {
+		get?: (name: string, strict?: boolean) => unknown;
+		provide?: (name: string, value: unknown) => unknown;
+	};
+	if (typeof compat.provide !== "function") return;
+	try {
+		// Never shadow a real implementation (0.1.6 and older provide one).
+		if (compat.get?.("settingsScope")) return;
+		const snapshots = new Map<string, unknown>();
+		compat.provide("settingsScope", {
+			bind(spec?: { namespace?: string }) {
+				const namespace = String(spec?.namespace ?? "");
+				let snapshot = snapshots.get(namespace);
+				if (!snapshot) {
+					snapshot = {
+						status: "ready",
+						writable: false,
+						value: { provider: "deepseek" },
+					};
+					snapshots.set(namespace, snapshot);
+				}
+				return {
+					getSnapshot: () => snapshot,
+					subscribe: () => () => {},
+					set: () => snapshot,
+				};
+			},
+		});
+	} catch {
+		// A real provider appeared concurrently — the real one wins.
+	}
 }
 
 interface StatusPayload {
@@ -199,6 +261,7 @@ const STATE_VIEW: Record<
 };
 
 export function apply(ctx: ClientContext): void {
+	installLegacySettingsScope(ctx);
 	const SidebarAction = (): unknown => {
 		const [open, setOpen] = useState<boolean>(false);
 		const [st, setSt] = useState<StatusPayload | undefined>(undefined);
@@ -223,6 +286,7 @@ export function apply(ctx: ClientContext): void {
 		const [modelCatalog, setModelCatalog] = useState<
 			NonNullable<ManagementPayload["modelCatalog"]>
 		>([]);
+
 
 		useEffect(() => {
 			if (!open) return;

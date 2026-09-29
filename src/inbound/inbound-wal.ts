@@ -61,6 +61,8 @@ export interface InboundWal {
   accept(rec: Omit<InboundWalRecord, "acceptedAt" | "attempts" | "state">): InboundWalRecord;
   /** Mark the request for a messageId as delivered (turn output enqueued). */
   delivered(messageId: string): void;
+  /** Mark and return the oldest unresolved FIFO request for a conversation. */
+  deliveredOldest(sessionKey: string): InboundWalRecord | undefined;
   /** Mark accepted → replayed and bump attempt count. Returns false when it
    *  should NOT be replayed (already delivered / over attempt cap / too old). */
   markReplay(messageId: string): boolean;
@@ -79,6 +81,8 @@ export interface InboundWal {
   /** GH #9: terminal-mark a record that can no longer be replayed (cap/
    *  retention exhausted) so it stops masquerading as accepted. */
   fail(messageId: string): void;
+  /** Terminal-mark and return the oldest unresolved FIFO request. */
+  failOldest(sessionKey: string): InboundWalRecord | undefined;
   /** GH #9: how many records failed delivery (surfaced in /status). */
   failedCount(): number;
   pendingCount(): number;
@@ -134,6 +138,25 @@ export function createInboundWal(deps: InboundWalDeps): InboundWal {
     }
   }
 
+  function oldestUnresolved(sessionKey: string): InboundWalRecord | undefined {
+    const rows = [...records.values()]
+      .filter(
+        (record) =>
+          record.sessionKey === sessionKey &&
+          record.state !== "delivered" &&
+          record.state !== "failed",
+      )
+      .sort((a, b) => a.acceptedAt - b.acceptedAt);
+    let changed = false;
+    while (rows[0] && now() - rows[0].acceptedAt > replayRetentionMs) {
+      rows[0].state = "failed";
+      rows.shift();
+      changed = true;
+    }
+    if (changed) persistAll();
+    return rows[0];
+  }
+
   load();
 
   return {
@@ -156,6 +179,13 @@ export function createInboundWal(deps: InboundWalDeps): InboundWal {
       if (!rec || rec.state === "delivered") return;
       rec.state = "delivered";
       persistAll();
+    },
+    deliveredOldest(sessionKey) {
+      const rec = oldestUnresolved(sessionKey);
+      if (!rec) return undefined;
+      rec.state = "delivered";
+      persistAll();
+      return { ...rec };
     },
     fail(messageId) {
       const rec = records.get(messageId);
@@ -198,15 +228,21 @@ export function createInboundWal(deps: InboundWalDeps): InboundWal {
       const deliveredCutoff = now() - replayRetentionMs;
       let changed = false;
       for (const [id, r] of records) {
-        // Delivered/failed records age out after retention; never-delivered
-        // records are retained only while still within the replay window and
-        // attempt budget.
-        const expired =
-          r.state === "delivered" || r.state === "failed"
-            ? r.acceptedAt < deliveredCutoff
-            : r.acceptedAt < deliveredCutoff && r.attempts >= maxReplayAttempts;
-        if (expired) {
+        const old = r.acceptedAt < deliveredCutoff;
+        if (!old) continue;
+        // Terminal records and already-exhausted replays can age out. An old
+        // accepted record with attempts left used to remain "accepted"
+        // forever (invisible to pendingReplays) and later stole FIFO delivery
+        // from a new turn. Give it one diagnosable failed lifecycle instead.
+        if (
+          r.state === "delivered" ||
+          r.state === "failed" ||
+          r.attempts >= maxReplayAttempts
+        ) {
           records.delete(id);
+          changed = true;
+        } else {
+          r.state = "failed";
           changed = true;
         }
       }
@@ -225,6 +261,13 @@ export function createInboundWal(deps: InboundWalDeps): InboundWal {
         // best effort; the in-memory boundary is already clean
       }
       persistAll();
+    },
+    failOldest(sessionKey) {
+      const rec = oldestUnresolved(sessionKey);
+      if (!rec) return undefined;
+      rec.state = "failed";
+      persistAll();
+      return { ...rec };
     },
     failedCount: () =>
       [...records.values()].filter((r) => r.state === "failed").length,

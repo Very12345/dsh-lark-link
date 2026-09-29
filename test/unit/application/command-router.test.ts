@@ -52,6 +52,15 @@ test("router: plain text routes to agent", async () => {
   assert.equal(await router.route(mkMsg("hello")), "agent");
 });
 
+test("router: /manage (对话管理) is a bridge command, /sessions remains its alias", async () => {
+	const { router } = makeRouter({
+		bridgeHandler: async (name) => ["manage", "sessions", "resume"].includes(name),
+	});
+	assert.equal(await router.route(mkMsg("/manage")), "bridge");
+	assert.equal(await router.route(mkMsg("/sessions", "m-sessions")), "bridge");
+	assert.equal(await router.route(mkMsg("/manage 2", "m-manage-2")), "bridge");
+});
+
 test("router: bridge commands are consumed by the bridge", async () => {
 	const { router } = makeRouter({ bridgeHandler: async (name) => ["status", "support", "reasoning", "thinking"].includes(name) });
 	assert.equal(await router.route(mkMsg("/status")), "bridge");
@@ -95,6 +104,41 @@ test("router: /resume is a Tier-1 bridge command (handled before DSH tier)", asy
   assert.equal(await router.route(mkMsg("/resume")), "bridge");
   assert.equal(await router.route(mkMsg("/resume 2")), "bridge");
   assert.deepEqual(seen, ["resume", "resume"]);
+});
+
+test("router: control-panel and observability commands are Tier-1 (no DSH round-trip)", async () => {
+	const handled = [
+		"menu",
+		"usage",
+		"whoami",
+		"cwd",
+		"files",
+		"stream",
+		"reconnect",
+		"cfg",
+		"sessions",
+	];
+	const seen: string[] = [];
+	const { router } = makeRouter({
+		bridgeHandler: async (name) => {
+			seen.push(name);
+			return handled.includes(name);
+		},
+	});
+	for (const line of [
+		"/menu",
+		"/usage",
+		"/whoami",
+		"/cwd",
+		"/files",
+		"/stream on",
+		"/reconnect",
+		"/cfg streaming.enabled=true",
+		"/sessions",
+	]) {
+		assert.equal(await router.route(mkMsg(line)), "bridge", `${line} 应为 Tier-1`);
+	}
+	assert.deepEqual(seen, handled);
 });
 
 test("router: commands with leading @mentions in group chats route correctly", async () => {
