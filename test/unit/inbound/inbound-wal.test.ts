@@ -174,16 +174,25 @@ test("GH #9: delivered still wins over failed (late rescue marks it delivered)",
 });
 
 
-test("persisted file uses 0600 mode", () => {
-  const dir = tmpdir();
-  const wal = createInboundWal({ dir });
-  wal.accept(base("perm1"));
-  wal.delivered("perm1");
-  // Find the most recent segment written.
-  const segs = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
-  assert.ok(segs.length > 0);
-  const last = segs[segs.length - 1];
-  assert.ok(last !== undefined);
-  const mode = statSync(join(dir, last)).mode & 0o777;
-  assert.equal(mode, 0o600);
-});
+// Windows has no POSIX permission bits: chmod is a no-op and statSync reports
+// 0o666 for every file, so this assertion can only hold on POSIX. The 0o600
+// write mode in the WAL is still applied unconditionally -- it is simply not
+// observable here. Skipping keeps a clean-clone `npm test` green on Windows
+// instead of reporting a failure that no code change can fix.
+test(
+  "persisted file uses 0600 mode",
+  { skip: process.platform === "win32" ? "POSIX file modes are not available on Windows" : false },
+  () => {
+    const dir = tmpdir();
+    const wal = createInboundWal({ dir });
+    wal.accept(base("perm1"));
+    wal.delivered("perm1");
+    // Find the most recent segment written.
+    const segs = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    assert.ok(segs.length > 0);
+    const last = segs[segs.length - 1];
+    assert.ok(last !== undefined);
+    const mode = statSync(join(dir, last)).mode & 0o777;
+    assert.equal(mode, 0o600);
+  },
+);
