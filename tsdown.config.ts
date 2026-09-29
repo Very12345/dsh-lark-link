@@ -38,7 +38,12 @@ export default defineConfig([
 		external: [/^@deepseek-ai\//, "react"],
 		outputOptions: {
 			entryFileNames: "client.js",
-			banner: `window.__ModuleLoader__.load({ id: "dsh-lark-link", factory: (require) => {`,
+			// The registration id must be the FULL published package name: the
+			// client-modules host requests each bundle under its package name
+			// (`plugins/?<id>/client.js`) and then asserts the script registered
+			// that same id. A bare `dsh-lark-link` never matches, so the browser
+			// reports `loaded without registering "@very12345/dsh-lark-link"`.
+			banner: `window.__ModuleLoader__.load({ id: "@very12345/dsh-lark-link", factory: (require) => {`,
 			intro: "var module = { exports: {} }; var exports = module.exports;",
 			footer: "return module.exports; } });",
 		},

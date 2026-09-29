@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-	id: "dsh-lark-link",
+	id: "@very12345/dsh-lark-link",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
