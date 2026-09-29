@@ -22,6 +22,13 @@ Thumbs.db
 # bridge runtime state (if ever created here)
 .dsh/
 
+# DSH credential stores — never commit. DSH keeps API keys and app secrets in
+# these plaintext YAML documents under $DSH_HOME.
+.credentials.yaml
+.credentials.yaml.*
+**/.credentials.yaml
+**/.credentials.yaml.*
+
 # research/ is private local material (surveys + cloned reference repos) — never published
 research/
 .playwright-mcp/
