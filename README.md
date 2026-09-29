@@ -27,6 +27,20 @@ allowBuilds:
 该脚本只是 `node scripts/postinstall`（写版本标记），飞书 SDK 用的是 protobufjs 的纯 JS 运行时 API。
 用 `dsh plugin --profile <name> approve-builds protobufjs` 可以生成上面的配置。
 
+**为什么装了却提示 `failed to import`**：本分叉的包名是 `@very12345/dsh-lark-link`，
+而 bundle 的 `cordis.patch.yml` 必须用**完整包名**声明加载条目：
+
+```yaml
+- insert:
+    - id: lark-link
+      name: '@very12345/dsh-lark-link'   # 不能写成裸名 dsh-lark-link
+```
+
+dsh 加载器用这个 `name` 作为模块标识符，从 profile 目录解析。上游包名是 `dsh-lark-link`，
+裸名在 profile 里解析不到（pnpm 把本分叉装在带 scope 的目录下），条目 import 失败，
+插件就永远不会激活，UI 上表现为「1 entry did not activate lark-link: failed to import」。
+这条与 dsh 版本、插件依赖都无关——纯粹是标识符必须等于真实包名。
+
 **为什么 `dist/` 被提交进仓库**：pnpm 同样默认拒绝为 git 依赖运行构建脚本
 （`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`）。git 安装会 clone 仓库，若 `dist/` 不在其中就没有入口文件，
 而 `prepack` 又不会被执行。提交 `dist/` 后 git 安装无需任何构建步骤。改 `src/` 后记得 `npm run build`。
@@ -97,10 +111,10 @@ allowBuilds:
 
 ```bash
 # 1. 安装插件（npm 官方包，装预构建产物，无需构建许可）：
-dsh plugin --profile web add dsh-lark-link@latest --ignore-scripts
+dsh plugin --profile web add @very12345/dsh-lark-link@latest --ignore-scripts
 
 #   升级：
-#   dsh plugin --profile web update dsh-lark-link --latest --ignore-scripts
+#   dsh plugin --profile web update @very12345/dsh-lark-link --latest --ignore-scripts
 #
 #   或本地 tarball（先在源码目录 npm pack 生成，离线/内网友好）：
 #   dsh plugin --profile web add ./dsh-lark-link-<version>.tgz --ignore-scripts
@@ -119,13 +133,13 @@ dsh plugin --profile web add dsh-lark-link@latest --ignore-scripts
 
 ```bash
 # 1. 绕过标签，直接看官方源的真实版本列表：
-npm view dsh-lark-link versions --registry https://registry.npmjs.org
+npm view @very12345/dsh-lark-link versions --registry https://registry.npmjs.org
 
 # 2. 显式版本号安装（最可靠，不依赖镜像标签）：
-dsh plugin --profile web add dsh-lark-link@<新版本号> --ignore-scripts
+dsh plugin --profile web add @very12345/dsh-lark-link@<新版本号> --ignore-scripts
 
 # 3. 或强制官方源再走 @latest：
-dsh plugin --profile web add dsh-lark-link@latest --ignore-scripts --registry https://registry.npmjs.org
+dsh plugin --profile web add @very12345/dsh-lark-link@latest --ignore-scripts --registry https://registry.npmjs.org
 ```
 
 再遇 *Already up to date* 但怀疑有新版：先 `dsh plugin --profile web outdated` 看它认为的版本——outdated 都显示旧版，基本就是镜像标签没刷新，用上面的显式版本号绕开。装完**重启 `dsh web`** 生效。
@@ -273,7 +287,7 @@ MIT — 自由使用、修改、分发。
 Prerequisites: Node.js ≥ 24 and DeepSeek Harness installed (`npm i -g @deepseek-ai/dsh`).
 
 ```bash
-dsh plugin --profile web add dsh-lark-link@latest --ignore-scripts
+dsh plugin --profile web add @very12345/dsh-lark-link@latest --ignore-scripts
 dsh web
 /lark setup          # scan QR (30s)
 /lark start
@@ -281,7 +295,7 @@ dsh web
 
 Open Feishu, find your bot, send anything — reaction receipt + full reply = end-to-end. **Group chats need no @-mention.**
 
-Install variants: local tarball (`npm pack`, then `dsh plugin --profile web add ./dsh-lark-link-<version>.tgz --ignore-scripts`) or GitHub source (`github:amlyczz/dsh-lark-link`, requires build approval). Upgrade with `dsh plugin --profile web update dsh-lark-link --latest --ignore-scripts`.
+Install variants: local tarball (`npm pack`, then `dsh plugin --profile web add ./very12345-dsh-lark-link-<version>.tgz --ignore-scripts`) or GitHub source (`github:Very12345/dsh-lark-link`, requires build approval). Upgrade with `dsh plugin --profile web update @very12345/dsh-lark-link --latest --ignore-scripts`.
 
 ### Updating after each release
 
@@ -289,13 +303,13 @@ Install variants: local tarball (`npm pack`, then `dsh plugin --profile web add 
 
 ```bash
 # 1. See the real version list, bypassing tags:
-npm view dsh-lark-link versions --registry https://registry.npmjs.org
+npm view @very12345/dsh-lark-link versions --registry https://registry.npmjs.org
 
 # 2. Install by explicit version (most reliable):
-dsh plugin --profile web add dsh-lark-link@<new-version> --ignore-scripts
+dsh plugin --profile web add @very12345/dsh-lark-link@<new-version> --ignore-scripts
 
 # 3. Or force the official registry with @latest:
-dsh plugin --profile web add dsh-lark-link@latest --ignore-scripts --registry https://registry.npmjs.org
+dsh plugin --profile web add @very12345/dsh-lark-link@latest --ignore-scripts --registry https://registry.npmjs.org
 ```
 
 Suspicious *Already up to date*? Run `dsh plugin --profile web outdated` first — if it also shows the old version, the mirror tag is stale; use an explicit version. **Restart `dsh web`** after installing.
