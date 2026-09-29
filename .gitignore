@@ -26,6 +26,27 @@ Thumbs.db
 research/
 .playwright-mcp/
 
+# ---------------------------------------------------------------------------
+# Private deployment runbook: real hosts, SSH ports and absolute paths.
+# Extracted from README.md so the public README carries no infrastructure data.
+# ---------------------------------------------------------------------------
+LOCAL-DEPLOYMENT.md
+
+# ---------------------------------------------------------------------------
+# Machine-specific ops scripts (two-host deploy, DSH upgrade/rollback, TUI
+# profile wiring, cleanup chains). These reference real hosts and local
+# layouts, so they stay local. Only upstream's dev-link.mjs + restart-dsh.sh
+# and the environment-agnostic helpers under scripts/dev/ are published.
+# ---------------------------------------------------------------------------
+scripts/*.sh
+!scripts/restart-dsh.sh
+scripts/dsh-preview
+
+# internal working notes / upstream issue drafts
+.spec/
+ISSUE-awesome-dsh-plugins.md
+ISSUE-awesome-dsh-plugins.en.md
+
 # ad-hoc local scratch scripts (vision/OCR probes, throwaway tools) — never publish
 .vision.*.mjs
 .*.tmp.mjs

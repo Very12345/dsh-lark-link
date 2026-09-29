@@ -1,0 +1,45 @@
+NOTICE
+======
+
+This package is a FORK. It is not the original work in its entirety.
+
+Upstream project
+----------------
+  Name:    dsh-lark-link
+  Author:  amlyczz
+  Source:  https://github.com/amlyczz/dsh-lark-link
+  npm:     https://www.npmjs.com/package/dsh-lark-link
+  License: MIT
+  Copyright (c) 2026 dsh-lark-link contributors
+
+This fork
+---------
+  Name:   @very12345/dsh-lark-link
+  Source: https://github.com/Very12345/dsh-lark-link
+  Maintainer: Very12345
+  License: MIT (see LICENSE — the upstream copyright notice is retained)
+
+Relationship to upstream
+------------------------
+This repository is a direct descendant of the upstream Git history: the fork's
+commits are layered on top of upstream's `main`, and upstream's original commits
+including the copyright notice remain intact in this repository's history.
+
+Changes added downstream (not present upstream)
+-----------------------------------------------
+  - CardKit AI streaming status with real total token usage
+  - Per-app isolation and multi-user management
+  - Manual Lark credential setup channel alongside QR auth
+  - Per-conversation reasoning-effort controls
+  - Session administration, aliases and task registry
+  - Site preview over an authenticated tunnel
+  - Workspace session browsing and in-place streaming card updates
+
+Users who want the original, unmodified plugin should install `dsh-lark-link`
+from npm or from the upstream repository above.
+
+Trademarks
+----------
+DeepSeek, Feishu and Lark are trademarks of their respective owners. This is a
+community plugin and is not affiliated with, endorsed by, or sponsored by
+DeepSeek, Feishu or Lark.

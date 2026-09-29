@@ -1,12 +1,20 @@
 {
-  "name": "dsh-lark-link",
-  "version": "0.5.4-webagent.18",
-  "description": "High-reliability Feishu/Lark bridge for DeepSeek Harness — QR one-click auth, multi-mode agents, card-based commands, zero-loss outbox, media in/out, session logs, reusable DSH Web GUI",
+  "name": "@very12345/dsh-lark-link",
+  "version": "0.5.4-webagent.53",
+  "description": "Fork of dsh-lark-link — Feishu/Lark bridge for DeepSeek Harness with card streaming status, per-app isolation, multi-user management, session admin and site preview.",
   "type": "module",
   "license": "MIT",
+  "author": "Very12345 (fork) — upstream author: amlyczz",
+  "contributors": [
+    "amlyczz (upstream author of dsh-lark-link)"
+  ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/amlyczz/dsh-lark-link.git"
+    "url": "git+https://github.com/Very12345/dsh-lark-link.git"
+  },
+  "homepage": "https://github.com/Very12345/dsh-lark-link#readme",
+  "bugs": {
+    "url": "https://github.com/Very12345/dsh-lark-link/issues"
   },
   "keywords": [
     "dsh-plugin",
@@ -100,6 +108,9 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
+      "inject": [
+        "slots"
+      ],
       "platform": "web"
     }
   },
@@ -109,6 +120,7 @@
     "cordis.patch.yml",
     "README.md",
     "LICENSE",
+    "NOTICE",
     "CHANGELOG.md"
   ],
   "scripts": {

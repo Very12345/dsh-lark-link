@@ -1,5 +1,183 @@
 # Changelog
 
+## 0.5.4-webagent.52
+
+- Session logs are matched by SHAPE (`session[.<fmt>].jsonl.zstd`) instead of a fixed list. DSH's 0.2 line writes `session.v4.jsonl.zstd`, and the v3-only list made EVERY session look missing there: the Feishu `/manage` delete failed with 找不到该会话的持久化日志, the row came back after a refresh, and the archived-gate census reported the whole list as dangling. One matcher now covers v3/v4/future formats (a directory holding several resolves newest-first).
+- Archived-conversation management moved OUT of the bridge into its own plugin (`dsh-archive-delete`): that plugin injects a delete button into the Web GUI's session-row hover card and owns its host route, so the bridge stays a bridge. The Feishu `/manage` panel still deletes sessions — now with correct v4 resolution.
+
+## 0.5.4-webagent.51
+
+- Archived conversations are now manageable from OUR plugin, closing the Web GUI gap. DSH "archives" a conversation by hiding its session id in the host gate list (`<DSH_HOME>/storages/workspace.json` → `global.archivedSessionIds`) — nothing is deleted and the GUI offers neither a list nor a delete for those entries (which is why the community ships third-party plugins for it, all of them still pinned to the 0.1.x line). The host half reads/writes that list atomically (every other key of the storage document is preserved) and exposes it at `GET/POST /plugins/lark-link/archived`; the sidebar panel renders it with **清理悬空** (drop entries whose session directory is gone — 36 of 70 here — list-only, no data touched), **删除** (session + entry together, through the ordinary session-admin path that refuses sessions DSH still holds) and **移出** (drop the entry, keep the session). Feishu's `/manage` could already delete archived sessions; this is the missing GUI affordance, implemented in our layer instead of depending on a third-party plugin's release cadence.
+- `resolveDshHome()` extracted next to `resolveSessionsRoot()` so both resolve the harness home identically (`DSH_HOME` → `WEBAGENT_HOME/deepseek-harness` → `~/.dsh`).
+
+## 0.5.4-webagent.50
+
+- Compatibility shim for the legacy `settingsScope` CLIENT service, added to OUR plugin's client half. DSH 0.1.7-rc removed that service (settings are declared host-side via `settings.installSection` and rendered by the generic settings UI), while the WebAgent integration plugin bundled inside `webagent-dsh-core 7.4.4` still injects it — its entry parked at `pending (waiting for service: settingsScope)` and the Web GUI reported "Failed to load plugins / 1 entry did not activate". Supplying the legacy contract lets that entry activate **untouched**: the adaptation lives in the plugin layer, not in the vendor's versioned code. The shim is deliberately read-only (`status: ready`, `writable: false`, stable snapshot for `useSyncExternalStore`) because the value is owned by the profile patch layer (`webagent-integration.patch.yml` sets the search provider), and it steps aside whenever a real implementation exists (0.1.6 and older).
+
+## 0.5.4-webagent.49
+
+- `lark_publish_site` no longer dies with "无法定位当前飞书会话" when the session has no Feishu route. Two independent causes are fixed: (1) the session→route fallback could not actually parse a bridge session id (`lark-link:<taskKey>:<nonce>:<index>` — it stripped a single trailing segment, which never matches `<nonce>:<index>`), and it returned a TASK key where routes are keyed by CONVERSATION; (2) a session that simply has no Feishu chat (DSH Web GUI) was treated as an error. Now: `conversationKeyForSessionId()` peels prefix → nonce → index → `#task`, `routeForSessionId()` tries the backend reverse map, then the parsed key, then a route scan, and publishing itself works WITHOUT a route — the site is published and the link returned; only the card is skipped (with `delivery` text saying why). `lark_send_local_file` keeps failing without a route (there is nowhere to send a file) but says so explicitly instead of the generic message.
+- `chatId` is optional in the preview registry (`PreviewEntry` / `PublishRequest`) since a web-GUI publish has no chat to deliver to.
+
+## 0.5.4-webagent.48
+
+- The load-time prune of nested task groups now persists immediately: waiting for the next registry mutation left the litter in `tasks.json` across restarts even though memory was already clean.
+
+## 0.5.4-webagent.47
+
+- Fix EMPTY CONVERSATIONS LITTERING THE PANELS: the automatic post-failure rotation passed the forwarder's TASK key (`dm:oc_x#1`) into `rotate()`, which MINTS a task — so every failed turn created a nested group (`dm:oc_x#1` → `dm:oc_x#1#1`) that no message can ever route to. Those empty groups had no session, could be listed, and could not be deleted (nothing to delete, and the failure was silent). The rotation now normalizes to the conversation key first, `/tasks` resolves its key the same way, the registry DROPS nested top-level keys on load (existing litter heals itself after the upgrade), and a `sessionPersistence.delete` refusal no longer blocks the log removal that every panel actually reads.
+- Core provider (hot-patched on both hosts, same as the previous fixes): the SSE initial-activity window is 45s instead of 20s. Production showed the page accepting an action and starting to stream *after* 20s on a busy/cold page, which aborted whole turns with `provider_send_unconfirmed` even though nothing was wrong.
+
+## 0.5.4-webagent.46
+
+- NEW TOOL `lark_publish_site` — "发布网站" is now a first-class tool beside `lark_send_local_file`: the agent provides a `url` (an already-running dev server), a `port`, or a static `dir`, and the bridge owns everything else — the in-process static server (dir mode), the cloudflared quick tunnel, the lifecycle, and a 网站卡片 (在飞书内打开 / 调试模式 / 刷新链接 / 关闭预览). The agent no longer runs shell commands or copies tunnel URLs.
+- Lifecycle decisions are automatic and per conversation: same target + healthy tunnel → the previous link is reused (no churn); same target + dead/expired → refreshed with a new link; different target → the old preview is replaced. Links expire after ~2h; tunnels adopted after a reload keep serving until their TTL.
+- Registry persisted at `site-previews.json`; `site:refresh` / `site:stop` card buttons and plugin-unload teardown are wired. System prompt updated to teach the tool instead of the shell command.
+
+## 0.5.4-webagent.45
+
+- Fix WORKSPACE ISOLATION NEVER APPLYING — to sessions OR to any UI/tool surface. The adapter's `cwd` was still wired to the pre-isolation resolver (`conversation override ?? workspaceRoot ?? process.cwd()`), and on the core service `process.cwd()` IS the shared `dsh-workspace` root — so every session since .39 ran in the flat root (session headers prove it: `cwd=/home/ubuntu/dsh-workspace` on every new session). NINE more call sites had the same pre-isolation wiring: `/workspace` + `/files` browsers, `/cwd` + `/status` display, `/tasks`//manage session listing, `/goal`, and the `lark_send_local_file` containment root. ALL of them now resolve through the isolation-aware `workspaceForTaskKey` (conversation override honored only inside the user's `<root>/<5-letter hash>` subtree). The .40 note claiming "the agent's real cwd was isolated already" was wrong — this fixes the wiring, not the display.
+- Consequences: new sessions and new tasks land in `dsh-workspace/<hash>/`; session cwd is fixed at creation, so sessions created before .45 keep their historical (flat) root and no longer appear in that user's `/tasks`//manage history lists — a one-time cost of making isolation real. `lark_send_local_file` containment now clamps to the user's own subtree instead of the shared root.
+
+## 0.5.4-webagent.43
+
+- Reaction receipts are now a fixed STATE MAP instead of a random pick: inbound **OnIt**（收到，这就去办）→ completion **DONE ✅** → failure **ERROR ❌**. The old pool answered "something happened" with a random sticker; the reaction is now a statement about the turn. Configurable via `reactions.receipt` / `reactions.done` / `reactions.error` (Feishu-catalog emoji_type only — the reaction API rejects tenant custom emojis with 231001; case-sensitive: `Fire` is valid, `FIRE` is not).
+- The allow-list now covers the numeric-start official catalog values (`2022`, `18X`), and `/lark-config` values carrying JSON-array or quoted debris (`["Typing"]`, `"Yes"`) are normalized instead of poisoning the picker.
+
+## 0.5.4-webagent.42
+
+- TEMPORARY PAGE PREVIEW: the bridge now tells the model about `dsh-preview`, so "把游戏/页面发我看看" produces a clickable link instead of a screenshot or a wall of code. `dsh-preview <file|dir>` publishes that artifact (a file becomes `index.html`; a directory is copied as-is) and prints `PREVIEW_URL=…`; `dsh-preview --port 5173` publishes an already-running dev server instead, so Vite/Next projects keep their HMR. `--status` / `--stop` round it out. Every run gets a fresh link and the tunnel exits with its TTL, because this is for transient review, not hosting.
+- The link is reachable from a phone inside Feishu's in-app browser: it is a Cloudflare quick tunnel (no account, https, no interstitial). Campus inbound is unusable for this — the network fakes TCP handshakes on non-SSH ports — and the free SSH tunnels front the page with a challenge/warning page, so both were rejected after testing.
+- Only `~/.webagent-dsh/preview` is ever exposed, and `?debug=1` loads vConsole so a page can be inspected on the phone itself.
+
+## 0.5.4-webagent.41
+
+- The live header reports REAL token accounting instead of a token SPEED: `12s · 本回合 19.3K · 会话 122K tok` (plus `缓存命中 N%` once something was served from cache), the way DSH's own WebUI footer does. The numbers come from `assistant/message.usage` — input / output / cache read / cache write, disjoint counters — which the bridge used to drop on the floor; the stream-derived estimate now survives only as a `≈`-marked fallback for adapters that report nothing, and all-zero totals fall back to it too instead of claiming `0 tok` (that is what a provider-side failure used to show).
+- The per-episode `tok/s` machinery is gone: it needed an episode denominator, flickered while generating and read as noise — a total is what a reader can act on.
+- Removed the 400-patch global cap that used to STOP content updates mid-turn (long turns then landed only through the final PUT). Runaway cost stays impossible: the per-element 800ms throttle, the rate-limit backoff and the card-size budget all remain.
+- Compaction is rebuilt around "the newest state wins": every round folds into ONE collapsible panel (nested run panels are gone, so several sub-panels can never stand open at once), detail is budgeted by AGE (the newest round keeps the most; older rounds decay ×0.5 down to titles only), a binary search fits the exact card-size budget instead of jumping between four coarse presets, and structural fallbacks drop the OLDEST rounds before the newest ones. The status line and the visible answer are never compressed, and every degradation is logged (`stage` / `detailScale` / `bytes`).
+
+## 0.5.4-webagent.40
+
+- Fix the bot going SILENT on every message after the parallel-task release: the ConversationManager emits TASK keys (`dm:oc_x#2`) while the route table is keyed by CONVERSATION, so `routeFor` / `streamFor` / the task-card syncer / `ask_user_question` all looked up a key that never existed and the forwarder dropped every event without a trace. Task keys are now mapped back to their conversation before any route lookup, and a missing route is LOGGED instead of swallowed.
+- Fix the workspace shown by `/new`: the confirmation card printed the shared root (`dsh-workspace`) instead of the per-user hash directory, which made the isolation look broken (the agent's real cwd was isolated already).
+- Per-user isolation now defaults its base to `$HOME/dsh-workspace` (the deployment convention) instead of `process.cwd()`, which had been putting user roots inside the plugin install.
+
+## 0.5.4-webagent.39
+
+- PER-USER WORKSPACE ISOLATION: every user (or group) now works in `dsh-workspace/<5-letter hash of its id>/`. `/workspace`, the directory browser, `/cwd`, `/files` and session migration all refuse to leave that subtree, and an explicit override only counts while it stays inside it — one user can no longer read, overwrite or delete another user's files. `/lark-config workspaceIsolation=false` turns it off for single-owner deployments.
+- PARALLEL TASKS: a conversation now owns an ordered set of tasks instead of a single agent. `/new` opens a NEW task and leaves the previous one running (its agent, session and streaming card are untouched); every task has its own FIFO queue, watchdog and card, so a long job no longer blocks the next question.
+- `/tasks` replaces the `/resume` picker (`/resume` stays as an alias): it lists every task of the conversation with RUNNING FIRST, plus the historical sessions no task has claimed yet, and switches with one tap. `/tasks <序号|任务ID|会话ID前缀>` does the same by text.
+- Switching sends that task's briefing — status, workspace, preset, todo progress and the answer that is still being written — and a RUNNING task keeps streaming into its own card (已续上流式).
+- `/stop` cancels only the ACTIVE task; other tasks keep running. `/manage` still renames, deletes and migrates the underlying sessions.
+
+## 0.5.4-webagent.38
+
+- Fix EVERY card form silently reading as EMPTY: Feishu's v2 `card.action.trigger` body carries submitted form data at `action.form_value` (snake_case, per the official form-container documentation), while the bridge read `action.formValue` — and neither the SDK nor the transport normalizes the key. 新建文件夹 / 重命名 / 迁移项目 / 多选问卷 therefore all behaved as if nothing had been typed. Both spellings are accepted now (`formValuesOf`), with a regression test.
+
+## 0.5.4-webagent.37
+
+- Move conversation DELETION out of `/resume` into a new conversation-management command `/manage` (`/sessions` stays an alias): the picker was one mis-tap away from destroying a session, and deleting is not what "resume" means.
+- `/manage` is ONE panel with an explicit `退出对话管理` button — pick a session, then rename / delete / migrate project, return to the list, or exit. Every action re-renders the same card, so browsing sessions never floods the chat.
+- Rename works on HISTORICAL sessions: DSH's own `SessionTitleService.rename()` only accepts a session that is live in the host store, so the bridge keeps its own alias (`session-aliases.json`, 48 chars, shown in /manage and /resume) and additionally applies the real DSH title whenever the target IS live.
+- 迁移项目 moves a session between workspaces: copy the session directory into the target project, rewrite ONLY the header line's `cwd` (the header is the log's first line; every event line stays byte-identical), verify, drop the stale `session.lock`, and only then remove the source. A failure at any earlier point deletes the partial copy and leaves the original exactly as it was.
+- The migrate picker lists known projects from their sessions' headers (the projectKey directory encoding is lossy, so directory names cannot be decoded back) and also accepts a free-form absolute path.
+- Destructive / live-breaking actions are disabled for the session this conversation is using, and delete/move refuse outright any session DSH still holds.
+- `/resume`, `/help` and the control panel point at `/manage`; `/resume` keeps recovery only.
+
+## 0.5.4-webagent.36
+
+- Show REAL token totals in the streaming header instead of a derived speed. DSH records accounting on every step's `assistant/message` (`usage`), which the adapter dropped, so the header now mirrors DSH's own WebUI footer: `12s · 本回合 19.3K · 会话 122K tok`, plus `缓存命中 N%` once anything is served from cache. The turn total resets each turn while the session total accumulates across turns, so a rotated / `/new` session starts from zero. Token SPEED is gone: it needed a per-episode denominator, flickered while generating and read as noise.
+- Keep the stream-derived estimate only as a MARKED fallback (`≈1.2K tok`) for adapters that report no accounting — the header is never empty, and an estimate is never passed off as a real number.
+- Remove the 400-patch global cap that stopped content updates mid-turn: long turns keep streaming to the end, with the 800ms per-element throttle, the rate-limit backoff and the card-size budget carrying the load instead.
+- Compress by AGE with a fine-grained fit instead of four coarse presets: the newest round keeps full detail (900 chars) and every older round gets half as much, the allowance is binary-searched to fill the card budget exactly, and when even titles overflow the OLDEST rounds are dropped whole. A 24KB card holding 300 rounds still shows the current step in full — the latest state is the last thing to lose detail, and the status line plus the live/answer text are never compressed.
+- Flatten the process fold into ONE collapsible panel: nested round panels could stand open simultaneously, and Feishu never reports panel expansion (exclusivity cannot be enforced server-side). With a single fold, "only one open at a time" holds by construction and the card renders at nesting depth 1.
+- Log every compaction level change (`stage`, `detailScale`, bytes) so a degraded long turn is observable in the host log instead of being silently guessed at.
+
+## 0.5.4-webagent.35
+
+- Report the token speed PER GENERATION EPISODE instead of over a sliding window: each burst — thinking, then an answer, then thinking again after every tool round — is timed on its own, so the number is that episode's average. Stable by construction, never diluted by tool execution or by earlier bursts. An open episode always shows a number (0 included, i.e. before its first token); while a tool EXECUTES no number is shown at all; a settled turn reports its total time only, so no stale figure can linger.
+- Count the model's tool-call arguments as generated output too — they are produced inside the episode that requested the tool.
+- Show the 过程 fold DURING the turn rather than only after it: every intermediate step folds into the outer panel while streaming, while the text currently being written (or the settled answer) and any generated image stay visible. The process can therefore be collapsed mid-run, and the card never restructures when the turn ends.
+
+## 0.5.4-webagent.34
+
+- Name the real phase in the header instead of one generic label: `🧠 思考中` while the model reasons, `✍️ 生成中` while answer text streams, `🛠️ 工具执行中` while a tool runs, `✅ 对话结束` once the turn settles. The token rate is shown for BOTH thinking and generating (both are the model emitting tokens) and hidden during tool execution.
+- Sample the rate on the RENDER cadence instead of on every delta: bursts of chunks — or chunks arriving faster than the sample spacing — used to leave the sliding window with a single point, so no live rate appeared even while the model was plainly generating.
+
+## 0.5.4-webagent.33
+
+- Fix the token speed never appearing while generating: with the normal sub-second chunk cadence the sampler slid its single newest sample forward, so the sliding window never spanned. Samples are now taken at a steady cadence — the token counter is cumulative, so a skipped tick loses nothing.
+- Fix the absurd settled figure (e.g. `635 tok/s`): a settled `assistant/message` REPLACES the segment with the whole message, and that bulk was counted as freshly generated tokens while the measured generation time grew by milliseconds. Only real stream deltas feed the rate now, and the settled header FREEZES the last measurable rate instead of averaging over a turn whose true timing is not observable.
+
+## 0.5.4-webagent.32
+
+- Make the header's token speed a REAL-TIME rate instead of a whole-turn average: tokens generated over a short sliding window (6s). No number is shown while the model is not producing tokens — tool execution, provider wait, before the first tokens — because there is no token speed to report then. The previous average folded tool execution and first-token latency into its denominator and kept a number on screen during tool calls.
+- Once the turn settles the header switches to the turn's GENERATION-ONLY average (idle gaps capped at 2.5s), so tool time never dilutes the final figure. DSH's session events expose no usage counters (`turn/end` carries only `{turn, reason}`), so the count is still derived from the streamed content — but only active generation enters the timing.
+
+## 0.5.4-webagent.31
+
+- Fix the settled streaming card never showing its end state (header stuck on 生成中/调用中, no answer inside the card, answer only arriving through the durable text fallback): a long turn exceeded CardKit's card-size limit, the final `PUT` was rejected and the error was swallowed by the forwarder. The card is now serialized against an explicit byte budget and progressively compacted (per-round detail 900 → 300 → 120 → titles only → intermediate narration dropped) until it fits, and a still-rejected final `PUT` falls back to a minimal status+answer card instead of leaving a frozen card.
+- Add the missing second folding layer: once a turn ends, every intermediate step collapses into ONE outer `过程 · N 轮对话 · X 工具 · Y 思考` panel, so the settled card reads 总过程（可折叠）+ 结果. The answer and any generated image stay outside the fold. Round groups inside that panel now use labelled markdown blocks rather than nested panels, keeping the total nesting at two levels.
+
+## 0.5.4-webagent.30
+
+- Rewrite the streaming-card header: it now carries STATE only — `⏳ 正在生成` / `🛠️ 正在调用` / `✅ 对话结束` — plus the turn's total elapsed time and a live token rate (`tok/s`). Tool names and the old "工具调用成功 · bash" wording are gone from the header; the concrete tool, its arguments and its result remain inside the folded process panels.
+- Interleave the streaming-card body the way mainstream coding agents do: every RUN of consecutive thinking/tool rounds is folded into its own collapsible panel at its real timeline position, so a turn reads `message · [2 思考 · 3 工具] · message · [1 工具] · message …`. The previous version pinned ONE panel above the answer and stacked every round inside it, detaching tool rounds from the narration they belonged to.
+
+## 0.5.4-webagent.29
+
+- Fix a button on a rendered command panel appearing to do nothing (e.g. 「打开控制面板」 on `/help`): clicking adopts the same CardKit card into a new command state, which restarted the update `sequence` at 1 — CardKit silently discards a non-newer sequence (answering success), so the card never changed. Sequences are now monotonic per card, and adopting detaches the previous owner so its stale timer can no longer write to that card.
+- Surface CardKit business errors (`{code, msg}`) instead of treating them as success, so a rejected card update now falls back to the durable text channel rather than disappearing.
+
+## 0.5.4-webagent.28
+
+- Fix `/help` losing its entire content: the command panel discarded any card without callback buttons and replaced it with "✅ 操作已完成". Callback-less cards (help / status / resumed briefings) now render verbatim.
+- Stop flattening and clipping command output: multi-line replies (`/status`, `/files`, …) keep their newlines, and bodies larger than the panel limit fall back to a durable message instead of being cut into one 180-character line.
+- Turn `/workspace` into an interactive directory browser: `..` (disabled at the filesystem root), folder buttons, switch / new-folder / cancel — every step re-renders ONE card in place. Browsing may walk ABOVE the DSH workspace; folders can be created from the card form or with `/workspace mk <name>`. The model-facing `lark_send_local_file` keeps its workspace containment.
+- Add a grouped control panel (`/menu`, also reachable from `/help`) and a red failure state, and move every command reply onto the unified panel spec: `/status` (structured card), `/sessions` (merged into the `/resume` picker), `/new` (confirmation card), `/stop` (result card with follow-ups), `/lark-config` (button settings panel + advanced text form), `/goal` (control deck + templates, previously unreachable), `/lark` (admin panel).
+- Add `/usage`, `/whoami`, `/cwd`, `/files [path]`, `/stream on|off`, `/reconnect`; new folder-name validation and op-path decoding helpers.
+
+## 0.5.4-webagent.25
+
+- Preserve multiline short command feedback in the command panel.
+- Route oversized diagnostics/list outputs to the complete durable fallback instead of truncating them into the compact panel.
+
+## 0.5.4-webagent.24
+
+- Add confirmed deletion actions to the `/resume` picker; deletion is scoped to the selected workspace and refuses the current/live session.
+- Route durable text command replies through one per-chat CardKit command panel with an expanded collapsible menu; subsequent commands stream-refresh the same card and fall back to standalone delivery when CardKit is unavailable.
+- Keep command-panel updates serialized and retry-safe so a failed stream update does not duplicate a command entry.
+
+## 0.5.4-webagent.23
+
+- Enrich `/resume` with a no-cost persisted-session overview: topic, latest assistant progress, last activity, preset, user-turn count, and tool-call count.
+- Read DSH v3 logs through `sessionPersistence.open(id, "read")`, using bounded head/tail slices for large sessions and always closing read handles.
+- Keep compact numbered restore buttons while placing readable context above each action.
+
+## 0.5.4-webagent.22
+
+- Fix `/resume` on current DSH v3 hosts: unwrap `sessionPersistence.list()` snapshots instead of treating snapshots as headers.
+- Resolve webagent session storage from `$WEBAGENT_HOME/deepseek-harness/sessions` when `DSH_HOME` is unset.
+- Recognize current `session.v3.jsonl.zstd` logs while retaining the legacy filename fallback.
+- Fail loudly through the real conversation manager and log picker/restoration results for diagnosis.
+
+## 0.5.4-webagent.21
+
+- Recheck replay expiry at FIFO settlement time as well as boot, preventing a long-running process from letting an abandoned request steal a later turn's delivery marker.
+
+## 0.5.4-webagent.20
+
+- Terminalize accepted WAL records after their replay window instead of leaving them invisibly accepted forever; stale historical records can no longer consume the FIFO settlement intended for a new request.
+
+## 0.5.4-webagent.19
+
+- Settle inbound requests by per-conversation FIFO order instead of the mutable last-message route, preventing old accepted prompts from resurfacing after a restart or Web UI wake-up.
+- Terminal-mark no-output turns and automatically rotate sticky failed agents, so commands cannot remain healthy while ordinary messages disappear until `/new`.
+- Rebind the event hook as part of `/resume`, making the first continued turn observable immediately.
+- Replace lossy CardKit in-flight suppression with a serialized operation queue. All tool/reasoning rounds survive concurrent timer updates and finalization.
+- Fold the complete process into one compact `过程 · 工具 N 轮 · 思考 M 轮` panel; expanding it reveals chronological per-round panels, each expandable for details.
+
 ## 0.5.4-webagent.18
 
 - Preserve the real chronological Agent timeline in the live CardKit message: reasoning, ordinary assistant narration, tool calls/results, later reasoning rounds, images, and the final answer now remain interleaved instead of being flattened by event type.
@@ -15,7 +193,7 @@
 ## 0.5.4-webagent.16
 
 ### Fix: phase success is not session termination
-- Treat an `assistant/message` containing tool calls as an intermediate model step. Thinking/tool/output phases show their own success state; only the final DSH `turn/end` finalizes the card as “会话结束”.
+- Treat an `assistant/message` containing tool calls as an intermediate model step. Thinking/tool/output phases show their own success state; only the final DSH `turn/end` finalizes the card as "会话结束".
 - Backfill complete reasoning from the assembled assistant message when live reasoning deltas were missed, fixing expandable-but-empty reasoning panels.
 - Create reasoning and tool-activity collapsible panels independently and only when they contain data. The tool panel records call start plus success/failure using call-id correlation.
 
@@ -296,3 +474,12 @@
 - `/lark setup` 扫码一键建应用（registerApp + addons 显式订阅消息事件/群聊/表情权限）
 - 一键诊断（脱敏诊断包）
 - 进程内插件形态（Cordis `ctx.effect` disposer 干净卸载；多宿主 gateway 锁防护）
+# 0.5.4-webagent.26
+
+- Command replies now start streaming immediately: the shared expanded command panel shows a live elapsed timer while a command runs and replaces that same row with the durable final result.
+- Card-producing commands now settle their live row before delivering the interactive card, avoiding orphaned "running" states.
+# 0.5.4-webagent.27
+
+- Replaced the shared command-history card with one CardKit panel per command.
+- Interactive commands stay expanded while choosing; model/reasoning/mode/permission/resume actions now update and collapse the original panel in place.
+- Resume deletion confirmation and cancellation no longer leave a large stale card or emit a separate cancellation message.

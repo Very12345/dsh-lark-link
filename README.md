@@ -1,3 +1,9 @@
+<!-- FORK NOTICE: this is a personal fork of amlyczz/dsh-lark-link. -->
+> **这是 [`amlyczz/dsh-lark-link`](https://github.com/amlyczz/dsh-lark-link) 的个人分叉（fork）。**
+> 上游作者：amlyczz ｜ 上游 npm 包：[`dsh-lark-link`](https://www.npmjs.com/package/dsh-lark-link) ｜ 许可证：MIT
+> 本分叉由 Very12345 维护，在下游新增了卡片流式状态、多用户隔离、会话管理、站点预览等能力。
+> 若你需要稳定版本，请优先使用上游包。
+
 <p align="center">
   <img src="https://cdn.jsdelivr.net/gh/amlyczz/dsh-lark-link@main/assets/mascot.png" alt="dsh-lark-link mascot" width="420"/>
 </p>
@@ -38,7 +44,7 @@
 | 🎛 **权限分级** | 只读 / 工作区写 / **Full access** 三种权限，`/permission` 卡片即切；默认 Full access 全放行 |
 | 🎨 **卡片化命令** | `/mode` `/permission` `/model` `/reasoning` 全部是**单选按钮卡片**——点一下即切换；思考档位从当前模型动态读取并按飞书会话持久化 |
 | 💬 **意图确认转发** | 模型提问（`ask_user_question`）→ **飞书意图确认卡片**（选项按钮 + 下拉多选 + 自定义输入），答完模型继续，飞书里完成完整交互闭环 |
-| 😊 **表情回执** | 收到消息随机表情"已收到"；回复完成 / 命令完成打 **DONE ✅**（只使用飞书实测有效 emoji） |
+| 😊 **表情回执** | 固定状态映射（不是随机抽签）：收到消息打 **OnIt**（收到即办）、回复/命令完成打 **DONE ✅**、失败打 **ERROR ❌**（只用飞书官方目录内 emoji，可配置） |
 | 💪 **出站零丢失** | 持久 Outbox（JSONL + at-least-once + 幂等键 + 分航道并行 + 失败离队不阻塞 + 周期清理），kill 重启自动续投；桥命令回复同样走 Outbox |
 | 🆕 **入站请求补发** | Agent **处理到一半**插件/dsh 崩溃/重启，重启后自动重新触发这条用户消息（不再静默丢请求）——Inbound WAL 持久化 + 启动对账 + 次数上限/时间窗防空转；`/status` 显示待补发条数 |
 | 🛡 **连接自愈** | probe 驱动受控重连 + QuotaGovernor 配额熔断（窗口过期**自动解除、自动重连**）+ 断连补偿；环境代理自动规避 |
@@ -49,7 +55,7 @@
 | 👥 **多人隔离与管理** | 每个私聊 chat ID 独立映射到一条 DSH 会话链；Web UI 展示用户 open_id/名称、消息数、最近使用时间、工作区与活动会话，并提供启动、停止和重连按钮 |
 | 💳 **应用级模型访问策略** | Lark 管理面板可勾选该机器人允许使用的模型、设置机器人默认模型和默认工作区；被撤销的模型同时从 `/model` 隐藏并在执行层拒绝，DSH 网页端的全局模型配置不受影响 |
 | ✍️ **Markdown 渲染** | 回复自动检测 markdown → **CardKit 卡片**渲染（标题/列表/代码块/表格），纯文本走文本消息 |
-| 🌊 **流式状态与输出** | 每轮只创建一张 CardKit 卡片，按秒显示耗时；思考和工具调用分别使用按需出现的独立折叠面板，中间步骤只显示“成功”，仅最终 `turn/end` 显示“会话结束”。默认开启，可用 `/lark-config streaming.enabled=false` 关闭 |
+| 🌊 **流式状态与输出** | 每轮只创建一张 CardKit 卡片，按秒显示耗时；思考和工具调用分别使用按需出现的独立折叠面板，中间步骤只显示"成功"，仅最终 `turn/end` 显示"会话结束"。默认开启，可用 `/lark-config streaming.enabled=false` 关闭 |
 | 🆕 **长任务目标驱动** | `/goal <目标>` 直接在飞书启动自主长任务闭环；支持 `/goal pause`（暂停）、`/goal resume`（继续）、`/goal clear`（清除）；纯文本自然对话交互，告别冗余看板干扰 |
 | 🆕 **会话管理与恢复** | `/new` 当前工作区新起会话；`/resume` 极简卡片恢复历史会话（点选/序号/id 前缀，自动提取会话真实标题，彻底解决跨重启 live session 冲突）；`/workspace <路径>` 切换工作区；按会话完全独立持久化工作区/模型/模式 |
 | 🖥 **复用 DSH Web GUI** | 桥 Agent = 原生 DSH session，聊天/流式/工具卡/设置全由 GUI 呈现；会话自动归入对应工作区（不再"未分组"）；Web 面板实时显示 Outbox/补发计数 |
@@ -122,17 +128,23 @@ dsh web
 
 | 类别 | 命令 | 行为 |
 | ---- | ---- | ---- |
+| 控制面板 | `/menu`（`/help` 内有入口） | **分组按钮面板**：一条命令一个按钮，点一下就执行，免记忆免输入 |
 | 选择类 | `/mode` `/permission` `/model` `/reasoning` | **单选按钮卡片**，点选即切换（动态感知自建 preset、提供商与模型思考档位；`/thinking` 同义） |
-| 目标类 | `/goal [目标\|pause\|resume\|clear]` | 启动长任务自主执行 / 暂停 / 恢复 / 清除当前目标 |
-| 状态类 | `/status` `/sessions` `/help` | 全链路健康（含 Outbox/补发计数）/ 会话列表 / 帮助卡片 |
-| 会话类 | `/new` `/resume [序号\|id]` `/stop` `/workspace <路径>` | 新会话 / 极简恢复历史会话 / 停当前任务 / 切工作区 |
-| 诊断 | `/doctor` | ZIP 诊断包（session log + 配置 + ISSUE.md） |
-| 热改 | `/lark-config key=value` | 热改配置（如 `groupPolicy=open`、`agentPreset=standard`、`streaming.enabled=true`） |
+| 目标类 | `/goal [目标\|pause\|resume\|clear]` | 目标控制台卡片：暂停 / 恢复 / 清除按钮 + 常用目标模板按钮 |
+| 状态类 | `/status` `/usage` `/whoami` `/help` | 结构化健康卡（连接/队列/会话/补发分行，不再截断）/ 用量统计 / 当前会话诊断 / 分组命令清单 |
+| 会话类 | `/new` `/resume [序号\|id]` `/sessions` `/stop` | 新会话（**确认卡片**防误触）/ 恢复历史会话 / 会话选择器（等价 `/resume`）/ 停止当前任务 |
+| 工作区 | `/workspace` `/cwd` `/files [路径]` | **目录浏览器**：`..`、子文件夹、切换到此目录、新建文件夹、取消；单卡片原地流式刷新，可向上浏览到文件系统根 / 查看当前工作区及来源 / 列出目录内容 |
+| 诊断 | `/doctor` `/reconnect` | ZIP 诊断包（session log + 配置 + ISSUE.md）/ 断连自救重连 |
+| 热改 | `/lark-config` `/stream on\|off` | **按钮式设置面板**（流式卡片 / 表情回执 / 群策略一键切换）+ 高级文本形式；`/stream` 是流式开关快捷方式 |
+| 桥管理 | `/lark [setup\|start\|stop\|restart\|status\|uninstall-clean]` | 无参时输出**按钮面板**，不必手打子命令 |
 | DSH 命令 | `/compact` 等 | 原生执行，结果回飞书 |
 | 多媒体 | 发图片/文件 | 图片→视觉模型；文件→文本提取 |
 | 意图确认 | 模型提问 | 自动转**飞书意图确认卡片**，选项或输入作答 |
 
 > 命令无拦截、无门禁：一切 `/` 消息要么桥处理，要么原样交 DSH——绝不静默丢弃。skill 无前缀，直接说任务即可。
+>
+> 每条命令回复都落在**自己的折叠面板**里：执行中蓝色计时、成功绿色、失败红色，后续交互在原地更新同一张卡片，不会刷屏。
+> `/workspace` 浏览器允许向上浏览并切换到 dsh 工作区之上的目录（到文件系统根为止）；但模型侧的 `lark_send_local_file` 仍只允许发送**当前工作区内**的文件——这一不对称是刻意的：人能自由选目录，模型不能越权回传文件。
 
 ## ⚙️ 常用配置（`/lark-config` 热改，立即生效并持久化）
 
@@ -143,7 +155,8 @@ dsh web
 | `agentPreset` | `code` | Agent preset（shipped：standard/code/minimal/cordis，或 GUI 自建 id） |
 | `permissionMode` | `danger-full-access` | 权限：read-only / workspace-write / danger-full-access |
 | `streaming.enabled` | `true` | CardKit 流式卡片（默认开启；设为 `false` 可关闭） |
-| `reactions.enabled` | `true` | 表情回执 |
+| `reactions.enabled` | `true` | 表情回执开关 |
+| `reactions.receipt` / `done` / `error` | `OnIt` / `DONE` / `ERROR` | 三态表情（收到 / 完成 / 失败），需为飞书官方目录内的 emoji_type |
 | `allowlist` | `[]` | open_id 白名单，空 = 所有人可对话 |
 | `denyList` | `[]` | 命令前缀拒绝兜底 |
 | `workspaceRoot` | `` | 桥会话工作区根目录（空 = process.cwd()） |
@@ -211,7 +224,7 @@ MIT — 自由使用、修改、分发。
 | 🎛 **Permission tiers** | Read-only / workspace-write / **Full access**; `/permission` card switches instantly (Full access by default) |
 | 🎨 **Card-based commands** | `/mode` `/permission` `/model` `/reasoning` are **single-select button cards**; reasoning levels are discovered from the current model and persisted per Lark conversation |
 | 💬 **Intent confirmation** | Model questions (`ask_user_question`) land as **Feishu intent-confirmation cards** (option buttons + multi-select dropdown + custom text); answer and the agent resumes |
-| 😊 **Reaction receipts** | Random "got it" reaction on inbound; **DONE ✅** on completion (only Feishu-validated emojis) |
+| 😊 **Reaction receipts** | Fixed state mapping: **OnIt** on inbound (got it, on it), **DONE ✅** on completion, **ERROR ❌** on failure (only Feishu-catalog emojis, configurable) |
 | 💪 **Outbound zero-loss** | Persistent Outbox (JSONL + at-least-once + idempotency + per-lane parallel + failure quarantine + periodic prune), resumes after kill/restart; bridge command replies ride the Outbox too |
 | 🆕 **Inbound request replay** | If the agent dies / plugin reloads / dsh restarts MID-TURN, the interrupted user message is auto re-triggered on boot (no more silently dropped requests) — durable Inbound WAL + boot reconciliation + attempt/time caps; `/status` shows the pending-replay count |
 | 🛡 **Self-healing connection** | Probe-driven controlled reconnect + QuotaGovernor circuit breaker (auto-unblocks and reconnects after the quota window) + missed-message compensation; auto-avoids proxy env |
