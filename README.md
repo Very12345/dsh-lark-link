@@ -4,6 +4,33 @@
 > 本分叉由 Very12345 维护，在下游新增了卡片流式状态、多用户隔离、会话管理、站点预览等能力。
 > 若你需要稳定版本，请优先使用上游包。
 
+## 安装（本分叉）
+
+```sh
+# 方式一：git URL（本仓库已提交 dist/，可直接安装）
+dsh plugin --profile <name> add https://github.com/Very12345/dsh-lark-link
+
+# 方式二：本地 tarball（等价，且不受 pnpm 构建策略影响）
+npm pack && dsh plugin --profile <name> add file:/path/to/dsh-lark-link-<version>.tgz
+```
+
+安装前请确认目标 profile 的 `pnpm-workspace.yaml` 里有：
+
+```yaml
+allowBuilds:
+  protobufjs: true
+```
+
+**为什么需要它**：`protobufjs` 是 `@larksuiteoapi/node-sdk` 的传递依赖，带一个
+`postinstall` 脚本。pnpm 默认拦截依赖的构建脚本并以 **exit 1** 报
+`ERR_PNPM_IGNORED_BUILDS`，而 DSH 的插件安装器把非零退出当作安装失败——即使包已经装好。
+该脚本只是 `node scripts/postinstall`（写版本标记），飞书 SDK 用的是 protobufjs 的纯 JS 运行时 API。
+用 `dsh plugin --profile <name> approve-builds protobufjs` 可以生成上面的配置。
+
+**为什么 `dist/` 被提交进仓库**：pnpm 同样默认拒绝为 git 依赖运行构建脚本
+（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`）。git 安装会 clone 仓库，若 `dist/` 不在其中就没有入口文件，
+而 `prepack` 又不会被执行。提交 `dist/` 后 git 安装无需任何构建步骤。改 `src/` 后记得 `npm run build`。
+
 <p align="center">
   <img src="https://cdn.jsdelivr.net/gh/amlyczz/dsh-lark-link@main/assets/mascot.png" alt="dsh-lark-link mascot" width="420"/>
 </p>
