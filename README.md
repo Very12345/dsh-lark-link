@@ -1,159 +1,28 @@
-<!-- FORK NOTICE: this is a personal fork of amlyczz/dsh-lark-link. -->
-> **这是 [`amlyczz/dsh-lark-link`](https://github.com/amlyczz/dsh-lark-link) 的个人分叉（fork）。**
-> 上游作者：amlyczz ｜ 上游 npm 包：[`dsh-lark-link`](https://www.npmjs.com/package/dsh-lark-link) ｜ 许可证：MIT
-> 本分叉由 Very12345 维护，在下游新增了卡片流式状态、多用户隔离、会话管理、站点预览等能力。
-> 若你需要稳定版本，请优先使用上游包。
+# dsh-lark-link
 
-## 安装（本分叉）
+独立的 DSH 飞书/Lark 桥接插件，包名 `@very12345/dsh-lark-link`。这是 [amlyczz/dsh-lark-link](https://github.com/amlyczz/dsh-lark-link) 的个人分叉；上游作者为 amlyczz，本分叉由 Very12345 维护，许可证为 MIT。
+
+兼容目标为官方 DSH 0.2 系列，开发和运行环境要求 Node.js >= 24。它可直接使用 DSH 的模型与会话，不要求 WebAgent 应用或网页模型后端运行。若要通过飞书使用网页模型，另装 `dsh-webagent-integration` 并连接其后端。
+
+## 功能
+
+- 飞书消息与 DSH 双向桥接，支持流式卡片和停止当前任务。
+- 多应用、多用户的路由、会话、工作区与模型白名单隔离。
+- 按钮式命令面板、会话切换、目录浏览、诊断与断连补偿。
+- 凭据、入站 WAL、Outbox 和运行状态由插件管理；DSH 承担模型及 Agent 执行。
+
+## 安装与启动
 
 ```sh
-# 方式一：git URL（本仓库已提交 dist/，可直接安装）
-dsh plugin --profile <name> add https://github.com/Very12345/dsh-lark-link
-
-# 方式二：本地 tarball（等价，且不受 pnpm 构建策略影响）
-npm pack && dsh plugin --profile <name> add file:/path/to/dsh-lark-link-<version>.tgz
+dsh plugin --profile desktop add github:Very12345/dsh-lark-link
+# CLI WebUI 可选择 --profile web
 ```
 
-安装前请确认目标 profile 的 `pnpm-workspace.yaml` 里有：
+也可在本仓库执行 `npm pack`，再通过 `dsh plugin --profile <name> add file:/absolute/path/package.tgz` 安装。Git URL 安装所需 `dist/` 已提交；修改 `src/` 后必须重新构建。加载新版本后重启对应 DSH 宿主/profile。
 
-```yaml
-allowBuilds:
-  protobufjs: true
-```
+若安装器报告 `protobufjs` 构建脚本被阻止，按其提示使用 `dsh plugin --profile <name> approve-builds protobufjs` 允许该依赖。bundle patch 中的加载名必须是 `@very12345/dsh-lark-link`，避免与上游裸包名混用。
 
-**为什么需要它**：`protobufjs` 是 `@larksuiteoapi/node-sdk` 的传递依赖，带一个
-`postinstall` 脚本。pnpm 默认拦截依赖的构建脚本并以 **exit 1** 报
-`ERR_PNPM_IGNORED_BUILDS`，而 DSH 的插件安装器把非零退出当作安装失败——即使包已经装好。
-该脚本只是 `node scripts/postinstall`（写版本标记），飞书 SDK 用的是 protobufjs 的纯 JS 运行时 API。
-用 `dsh plugin --profile <name> approve-builds protobufjs` 可以生成上面的配置。
-
-**为什么装了却提示 `failed to import`**：本分叉的包名是 `@very12345/dsh-lark-link`，
-而 bundle 的 `cordis.patch.yml` 必须用**完整包名**声明加载条目：
-
-```yaml
-- insert:
-    - id: lark-link
-      name: '@very12345/dsh-lark-link'   # 不能写成裸名 dsh-lark-link
-```
-
-dsh 加载器用这个 `name` 作为模块标识符，从 profile 目录解析。上游包名是 `dsh-lark-link`，
-裸名在 profile 里解析不到（pnpm 把本分叉装在带 scope 的目录下），条目 import 失败，
-插件就永远不会激活，UI 上表现为「1 entry did not activate lark-link: failed to import」。
-这条与 dsh 版本、插件依赖都无关——纯粹是标识符必须等于真实包名。
-
-**为什么 `dist/` 被提交进仓库**：pnpm 同样默认拒绝为 git 依赖运行构建脚本
-（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`）。git 安装会 clone 仓库，若 `dist/` 不在其中就没有入口文件，
-而 `prepack` 又不会被执行。提交 `dist/` 后 git 安装无需任何构建步骤。改 `src/` 后记得 `npm run build`。
-
-<p align="center">
-  <img src="https://cdn.jsdelivr.net/gh/amlyczz/dsh-lark-link@main/assets/mascot.png" alt="dsh-lark-link mascot" width="420"/>
-</p>
-
-<h1 align="center">🪶 dsh-lark-link</h1>
-
-<p align="center">
-  <b>DeepSeek Harness × 飞书/Lark 双向桥接</b> — 把你的 DSH 智能体装进飞书，扫码 30 秒上线，随时随地对话
-</p>
-
-<p align="center">
-  <a href="https://www.npmjs.com/package/dsh-lark-link"><img src="https://img.shields.io/npm/v/dsh-lark-link?color=cb3837&label=npm&logo=npm" alt="npm"/></a>
-  <a href="https://github.com/amlyczz/dsh-lark-link/actions/workflows/ci.yml"><img src="https://github.com/amlyczz/dsh-lark-link/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
-  <img src="https://img.shields.io/badge/status-beta-orange" alt="beta"/>
-  <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT"/>
-  <img src="https://img.shields.io/badge/node-%3E%3D24-green" alt="node"/>
-</p>
-
----
-
-# 中文
-
-**DeepSeek Harness × 飞书/Lark 双向桥接插件** —— 把你的 DSH 智能体装进飞书：扫码 30 秒上线、消息零丢失、卡片化交互、每飞书会话独立 Agent。手机上随时给 Agent 派任务、看结果、切模型切模式——不用守着终端。
-
-## 🌟 为什么选 dsh-lark-link
-
-- **零门槛**：扫码即建飞书应用，不用手搓开放平台、不用配回调、不用公网服务器
-- **零丢失**：出站 Outbox + 入站 WAL 双持久化，进程崩溃 / 插件热更 / dsh 重启，消息和回答都补得回来
-- **零学习成本**：所有切换类命令都是单选卡片，点一下即生效；DSH 原生命令（/goal /compact …）直接用
-- **真 Agent**：不是聊天机器人——bash/文件/子代理/工作流全套工具，飞书里跑完整 Harness
-
-## ✨ 特性
-
-| 能力 | 说明 |
-| ---- | ---- |
-| 🎯 **一键认证** | `/lark setup` 扫码创建飞书应用（自动订阅消息事件 + 群聊全量 + 表情权限），**30 秒上线**；也可在 Web UI 的 Lark 面板手动填写 App ID / App Secret 并保存重连 |
-| 🧠 **多模式 Agent** | 标准 / Code / 极简 / Cordis preset + 你在 GUI 自建的 preset，飞书发 `/mode` 出**单选卡片**即切（默认 Code：一次执行多步工具调用，更快更省） |
-| 🎛 **权限分级** | 只读 / 工作区写 / **Full access** 三种权限，`/permission` 卡片即切；默认 Full access 全放行 |
-| 🎨 **卡片化命令** | `/mode` `/permission` `/model` `/reasoning` 全部是**单选按钮卡片**——点一下即切换；思考档位从当前模型动态读取并按飞书会话持久化 |
-| 💬 **意图确认转发** | 模型提问（`ask_user_question`）→ **飞书意图确认卡片**（选项按钮 + 下拉多选 + 自定义输入），答完模型继续，飞书里完成完整交互闭环 |
-| 😊 **表情回执** | 固定状态映射（不是随机抽签）：收到消息打 **OnIt**（收到即办）、回复/命令完成打 **DONE ✅**、失败打 **ERROR ❌**（只用飞书官方目录内 emoji，可配置） |
-| 💪 **出站零丢失** | 持久 Outbox（JSONL + at-least-once + 幂等键 + 分航道并行 + 失败离队不阻塞 + 周期清理），kill 重启自动续投；桥命令回复同样走 Outbox |
-| 🆕 **入站请求补发** | Agent **处理到一半**插件/dsh 崩溃/重启，重启后自动重新触发这条用户消息（不再静默丢请求）——Inbound WAL 持久化 + 启动对账 + 次数上限/时间窗防空转；`/status` 显示待补发条数 |
-| 🛡 **连接自愈** | probe 驱动受控重连 + QuotaGovernor 配额熔断（窗口过期**自动解除、自动重连**）+ 断连补偿；环境代理自动规避 |
-| 🔀 **命令三级分流** | 桥特有命令桥处理；DSH 注册命令原生执行；`/goal`、未知 `/xxx`、普通消息原样注入 Agent（无拦截无门禁）；**skill 无前缀**——直接描述任务，模型自动加载 |
-| 📎 **入站多媒体** | 飞书图片 → **视觉模型看图**（attachment 存储）；文件 → 有界文本提取进提示词 |
-| 📤 **出站多媒体** | 模型经 `lark_send_local_file` 主动回传本地图片/文件（工作区白名单 + 大小校验 + 格式自动降级） |
-| 🩺 **一键诊断** | `/doctor` → **ZIP 诊断包**（含当前会话完整 DSH session log + 脱敏配置 + ISSUE.md），发回飞书，贴给 AI 即可定位 |
-| 👥 **多人隔离与管理** | 每个私聊 chat ID 独立映射到一条 DSH 会话链；Web UI 展示用户 open_id/名称、消息数、最近使用时间、工作区与活动会话，并提供启动、停止和重连按钮 |
-| 💳 **应用级模型访问策略** | Lark 管理面板可勾选该机器人允许使用的模型、设置机器人默认模型和默认工作区；被撤销的模型同时从 `/model` 隐藏并在执行层拒绝，DSH 网页端的全局模型配置不受影响 |
-| ✍️ **Markdown 渲染** | 回复自动检测 markdown → **CardKit 卡片**渲染（标题/列表/代码块/表格），纯文本走文本消息 |
-| 🌊 **流式状态与输出** | 每轮只创建一张 CardKit 卡片，按秒显示耗时；思考和工具调用分别使用按需出现的独立折叠面板，中间步骤只显示"成功"，仅最终 `turn/end` 显示"会话结束"。默认开启，可用 `/lark-config streaming.enabled=false` 关闭 |
-| 🆕 **长任务目标驱动** | `/goal <目标>` 直接在飞书启动自主长任务闭环；支持 `/goal pause`（暂停）、`/goal resume`（继续）、`/goal clear`（清除）；纯文本自然对话交互，告别冗余看板干扰 |
-| 🆕 **会话管理与恢复** | `/new` 当前工作区新起会话；`/resume` 极简卡片恢复历史会话（点选/序号/id 前缀，自动提取会话真实标题，彻底解决跨重启 live session 冲突）；`/workspace <路径>` 切换工作区；按会话完全独立持久化工作区/模型/模式 |
-| 🖥 **复用 DSH Web GUI** | 桥 Agent = 原生 DSH session，聊天/流式/工具卡/设置全由 GUI 呈现；会话自动归入对应工作区（不再"未分组"）；Web 面板实时显示 Outbox/补发计数 |
-| 👥 **访问控制** | `allowlist` 限定可对话的 open_id 白名单；`groupPolicy` 群聊触发策略（open / mention / keywords / reply）；`denyList` 命令前缀拒绝兜底 |
-| 🔓 **默认 Full access** | 沙箱全访问 + 审批 never，零打扰 |
-
-## 🚀 快速开始
-
-**前置**：Node.js ≥ 24，已安装 DeepSeek Harness（`npm i -g @deepseek-ai/dsh`）。
-
-**安装（官方 `dsh plugin` 机制，无侵入）**——包以官方 bundle 格式分发（`package.json` 的 `dsh.bundle` + `cordis.patch.yml`），安装后自动并入 profile 的 `dsh.profile.bundles` 层：
-
-```bash
-# 1. 安装插件（npm 官方包，装预构建产物，无需构建许可）：
-dsh plugin --profile web add @very12345/dsh-lark-link@latest --ignore-scripts
-
-#   升级：
-#   dsh plugin --profile web update @very12345/dsh-lark-link --latest --ignore-scripts
-#
-#   或本地 tarball（先在源码目录 npm pack 生成，离线/内网友好）：
-#   dsh plugin --profile web add ./dsh-lark-link-<version>.tgz --ignore-scripts
-#
-#   或 GitHub 源码（需 prepare 构建 + allowBuilds 许可）：
-#   dsh plugin --profile web add github:amlyczz/dsh-lark-link
-```
-
-> **`--ignore-scripts`**：飞书 SDK 的传递依赖 protobufjs 带一个可忽略的 postinstall，pnpm 11 安全策略会拦截并返回非零退出码；加此参数跳过（protobufjs 不执行 postinstall 完全可用）。若你的 pnpm 已全局放行，可不加。
->
-> **`--profile web`**：指定安装到哪个 profile（web / tui / headless）。`dsh plugin` 是 pnpm 的转发命令，用法为 `dsh plugin --profile <name> <pnpm 参数>`。想让飞书和 GUI 共用 web profile 就保持 `web`。
-
-### 每次发布后：更新到最新版
-
-**不要依赖 `@latest`**：它读的是镜像返回的 `dist-tags.latest` 标签——npmmirror 等镜像的**标签缓存可能没刷新**（版本元数据已同步、tag 还指着旧版），pnpm 看到「已装版本 == tag」就报 *Already up to date*，哪怕新版早就发布了。tag 是镜像说了算，版本号是你说了算。
-
-```bash
-# 1. 绕过标签，直接看官方源的真实版本列表：
-npm view @very12345/dsh-lark-link versions --registry https://registry.npmjs.org
-
-# 2. 显式版本号安装（最可靠，不依赖镜像标签）：
-dsh plugin --profile web add @very12345/dsh-lark-link@<新版本号> --ignore-scripts
-
-# 3. 或强制官方源再走 @latest：
-dsh plugin --profile web add @very12345/dsh-lark-link@latest --ignore-scripts --registry https://registry.npmjs.org
-```
-
-再遇 *Already up to date* 但怀疑有新版：先 `dsh plugin --profile web outdated` 看它认为的版本——outdated 都显示旧版，基本就是镜像标签没刷新，用上面的显式版本号绕开。装完**重启 `dsh web`** 生效。
-
-```bash
-# 2. 启动 DSH Web GUI
-dsh web
-
-# 3. 在 GUI 的输入框（或终端 CLI）执行：
-/lark setup       # 扫码创建飞书应用（30 秒，面板显示二维码）
-/lark start       # 启动桥接
-```
-
-然后**飞书搜索你的机器人，发任意消息**——收到表情回执 + 完整回复即端到端连通。群聊**免 @**，直接说话即可。
+在 DSH 的输入框执行 `/lark setup` 完成应用配置，再执行 `/lark start`。Web UI 的 Lark 管理面板提供多应用及模型白名单设置。实际凭据写入 DSH 凭据服务，不放入 README 或源码。
 
 ## ⌨️ 命令
 
@@ -217,149 +86,21 @@ dsh web
 2. 把诊断包贴给任意 AI（或在 GitHub Issue 中发出来），即可快速定位
 3. `/status` 可随时看连接 / Outbox / 补发 / 会话全链路健康
 
-## 🛠 开发者
+## 开发与分发
 
-```bash
-npm run dev:link   # 链接本地 DSH checkout（类型检查/测试需要）
-npm run check      # tsc --noEmit
-npm test           # 264 项单元 + 集成测试
-npm run build      # tsdown → dist/（宿主 ESM + client bundle）
-npm pack           # 产出可分发 tarball
+```sh
+npm install
+npm run check
+npm test
+npm run build
+npm pack --dry-run
+npm pack
 ```
 
-**架构**：桥 = Cordis 插件（`dsh.bundle` 格式），分层清晰：
+`src/` 是 TypeScript 源码，`test/` 保存回归测试，`dist/` 是可分发宿主与客户端入口，`cordis.patch.yml` 是官方 bundle 配置。测试数量以当前测试报告为准。
 
-`host`（SDK 适配/认证）→ `inbound`（传输/群触发/断连补偿/Inbound WAL）→ `application`（命令路由/消息编排/诊断）→ `outbound`（Outbox/事件转发/卡片）→ `sessions`（每会话 Agent 管理）。
+每个仓库独立维护；本地私人部署记录在忽略的 `LOCAL-DEPLOYMENT.md` 和部署脚本中，不进入公共文档及发布包。工作区关系见 [总览](https://github.com/Very12345/dsagent-electron#readme)。
 
-CI（GitHub Actions）：push/PR 自动跑类型检查 + 264 项测试 + 构建；发布 npm 走 tag release 的 Publish workflow。
+## 许可证与上游
 
-## 📄 许可
-
-MIT — 自由使用、修改、分发。
-
-本项目为社区插件，与 DeepSeek、飞书或 Lark 无隶属关系。
-
----
-
-# English
-
-<p align="center">
-  <img src="https://cdn.jsdelivr.net/gh/amlyczz/dsh-lark-link@main/assets/mascot.png" alt="dsh-lark-link mascot" width="420"/>
-</p>
-
-**DeepSeek Harness × Feishu/Lark bridge** — put your DSH agent inside Feishu. Scan a QR code and go live in 30 seconds; chat from anywhere.
-
-## 🌟 Why dsh-lark-link
-
-- **Zero setup friction**: QR-scan app creation — no Open Platform fiddling, no callback URL, no public server
-- **Zero message loss**: durable Outbox (outbound) + Inbound WAL — crashes, hot reloads, and dsh restarts all recover
-- **Zero learning curve**: every toggle is a single-select card; native DSH commands (`/goal` `/compact` …) just work
-- **A real agent**: full tool belt (bash / files / subagents / workflows) driven from Feishu
-
-## ✨ Features
-
-| Capability | Description |
-| ---- | ---- |
-| 🎯 **One-click auth** | `/lark setup` scans a QR to create the Feishu app (auto-subscribes message events + group-all + reactions). The Web UI Lark panel also accepts a manual App ID / App Secret and reconnects after saving |
-| 🧠 **Multi-mode Agent** | Standard / Code / Minimal / Cordis presets + your custom GUI presets; `/mode` shows a **single-select card** — tap to switch (default Code: multi-step tools in one shot) |
-| 🎛 **Permission tiers** | Read-only / workspace-write / **Full access**; `/permission` card switches instantly (Full access by default) |
-| 🎨 **Card-based commands** | `/mode` `/permission` `/model` `/reasoning` are **single-select button cards**; reasoning levels are discovered from the current model and persisted per Lark conversation |
-| 💬 **Intent confirmation** | Model questions (`ask_user_question`) land as **Feishu intent-confirmation cards** (option buttons + multi-select dropdown + custom text); answer and the agent resumes |
-| 😊 **Reaction receipts** | Fixed state mapping: **OnIt** on inbound (got it, on it), **DONE ✅** on completion, **ERROR ❌** on failure (only Feishu-catalog emojis, configurable) |
-| 💪 **Outbound zero-loss** | Persistent Outbox (JSONL + at-least-once + idempotency + per-lane parallel + failure quarantine + periodic prune), resumes after kill/restart; bridge command replies ride the Outbox too |
-| 🆕 **Inbound request replay** | If the agent dies / plugin reloads / dsh restarts MID-TURN, the interrupted user message is auto re-triggered on boot (no more silently dropped requests) — durable Inbound WAL + boot reconciliation + attempt/time caps; `/status` shows the pending-replay count |
-| 🛡 **Self-healing connection** | Probe-driven controlled reconnect + QuotaGovernor circuit breaker (auto-unblocks and reconnects after the quota window) + missed-message compensation; auto-avoids proxy env |
-| 🔀 **3-tier command routing** | Bridge commands → bridge; DSH commands → native; `/goal`, unknown `/xxx`, plain text → injected verbatim (no gates). **Skills need no prefix** — just describe the task |
-| 📎 **Inbound media** | Feishu images → **visual model** (attachment-backed); files → bounded text extraction |
-| 📤 **Outbound media** | Model sends local files/images via `lark_send_local_file` (workspace whitelist + size/format checks) |
-| 🩺 **One-click diagnostics** | `/doctor` → **ZIP bundle** (full DSH session log + sanitized config + ISSUE.md) back to the chat |
-| ✍️ **Markdown rendering** | Replies auto-render as CardKit cards (headings/lists/code/tables); plain text stays plain |
-| 🌊 **Streaming status and output** | One CardKit card per turn shows elapsed seconds, reasoning in a native collapsed code panel, tool calls/results, answer generation, and an explicit terminal state; enabled by default, disable with `/lark-config streaming.enabled=false` |
-| 🆕 **Goal-driven long tasks** | `/goal <objective>` launches autonomous long-running task loops directly from Feishu; `/goal pause` / `resume` / `clear` manage execution via clean natural conversation |
-| 🆕 **Session management** | `/new` opens a fresh session; `/resume` clean-restores a historical session (button/index/id-prefix, resolves true titles, fixes cross-restart session collision); `/workspace <path>` switches; per-session isolated configuration |
-| 🖥 **Reuses DSH Web GUI** | Bridge agents are native DSH sessions; conversations auto-group under their workspace; the web panel shows live Outbox/replay counters |
-| 👥 **Access control** | `allowlist` restricts inbound to specific open_ids; `groupPolicy` (open / mention / keywords / reply); `denyList` command-prefix deny |
-| 💳 **App-scoped model policy** | The Web UI Lark panel selects the models this bot may use plus its default model and workspace; revoked models are filtered from `/model` and rejected again at execution time without changing the host-wide DSH defaults |
-| 🔓 **Full access by default** | Sandbox full access + never-ask approvals |
-
-## 🚀 Quickstart
-
-Prerequisites: Node.js ≥ 24 and DeepSeek Harness installed (`npm i -g @deepseek-ai/dsh`).
-
-```bash
-dsh plugin --profile web add @very12345/dsh-lark-link@latest --ignore-scripts
-dsh web
-/lark setup          # scan QR (30s)
-/lark start
-```
-
-Open Feishu, find your bot, send anything — reaction receipt + full reply = end-to-end. **Group chats need no @-mention.**
-
-Install variants: local tarball (`npm pack`, then `dsh plugin --profile web add ./very12345-dsh-lark-link-<version>.tgz --ignore-scripts`) or GitHub source (`github:Very12345/dsh-lark-link`, requires build approval). Upgrade with `dsh plugin --profile web update @very12345/dsh-lark-link --latest --ignore-scripts`.
-
-### Updating after each release
-
-**Don't rely on `@latest`**: it resolves the mirror's `dist-tags.latest` label — npmmirror-style mirrors can serve a **stale tag** (version metadata synced, tag still pointing at an older release), so pnpm sees *Already up to date* even though a newer version exists. The tag is what the mirror says; the version number is what you say.
-
-```bash
-# 1. See the real version list, bypassing tags:
-npm view @very12345/dsh-lark-link versions --registry https://registry.npmjs.org
-
-# 2. Install by explicit version (most reliable):
-dsh plugin --profile web add @very12345/dsh-lark-link@<new-version> --ignore-scripts
-
-# 3. Or force the official registry with @latest:
-dsh plugin --profile web add @very12345/dsh-lark-link@latest --ignore-scripts --registry https://registry.npmjs.org
-```
-
-Suspicious *Already up to date*? Run `dsh plugin --profile web outdated` first — if it also shows the old version, the mirror tag is stale; use an explicit version. **Restart `dsh web`** after installing.
-
-## ⌨️ Commands (Feishu side)
-
-- **Selectors** (single-select cards): `/mode` `/permission` `/model` `/reasoning` (`/thinking` alias)
-- **Goals**: `/goal [objective|pause|resume|clear]` (autonomous tasks / pause / resume / clear)
-- **Status**: `/status` `/sessions` `/help`
-- **Sessions**: `/new` `/resume [index|id]` `/stop` `/workspace <path>`
-- **Diagnostics**: `/doctor` (ZIP with session log)
-- **Hot reload**: `/lark-config key=value`
-- **DSH commands** run natively: `/compact` …
-- **Media**: send images/files to the bot
-- **Intent confirmations** auto-arrive as cards
-
-## ⚙️ Configuration (`/lark-config`, hot-reloaded & persisted)
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `groupPolicy` | `open` | group trigger: open / mention / keywords / reply |
-| `agentPreset` | `code` | agent preset (standard/code/minimal/cordis or custom) |
-| `permissionMode` | `danger-full-access` | read-only / workspace-write / danger-full-access |
-| `streaming.enabled` | `true` | CardKit streaming cards (enabled by default) |
-| `reactions.enabled` | `true` | reaction receipts |
-| `allowlist` | `[]` | open_id allowlist (empty = everyone) |
-| `denyList` | `[]` | command-prefix deny |
-| `workspaceRoot` | `` | workspace root for bridge sessions |
-| `attachments.retentionHours` | `168` | retention (hours) for inbound images/files (default 7 days; `0` = keep forever). Stored under the OS temp dir and swept by age |
-| `attachments.dir` | `` | inbound media root override (empty = OS tmpdir; applies after reload) |
-
-Credentials (appId/appSecret) live in the DSH credentials service, never in config files.
-
-## 🩺 Troubleshooting
-
-Send `/doctor` in Feishu — you get a ZIP with the full session log, sanitized config, and an ISSUE.md template. Hand it to any AI (or open a GitHub Issue). `/status` shows live connection / Outbox / replay health.
-
-## 🛠 Development
-
-```bash
-npm run dev:link && npm run check && npm test && npm run build
-```
-
-264 unit + integration tests. GitHub Actions CI runs typecheck + tests + build on every push/PR; npm publishing rides the release-tagged Publish workflow.
-
-Architecture (Cordis plugin, `dsh.bundle` format):
-`host` (SDK adapter/auth) → `inbound` (transport/group policy/compensation/Inbound WAL) → `application` (command routing/orchestration/diagnostics) → `outbound` (Outbox/event forwarding/cards) → `sessions` (per-chat agent management).
-
-## 📄 License
-
-MIT — free to use, modify, and distribute.
-
-This is a community plugin, not affiliated with DeepSeek, Feishu, or Lark.
+MIT，见 [LICENSE](./LICENSE)。保留上游作者及许可证信息；本分叉发布内容、版本和安装名以当前 `package.json` 为准，不以旧上游 README 的徽章或 npm 版本推断。商标与关系说明见 [NOTICE](./NOTICE)。
