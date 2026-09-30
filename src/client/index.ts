@@ -1,6 +1,6 @@
 // dsh-lark-link client half (browser). Reuses the DSH Web GUI entirely
-// (spec §7). This client adds one surface — a sidebar footer action whose
-// popover is a small STATE MACHINE over (configured × connection):
+// (spec §7). This client adds one surface — a settings section whose content is
+// a small STATE MACHINE over (configured × connection):
 //   not-configured → show the setup QR
 //   configured + stopped/idle → "ready, run /lark start"
 //   configured + connecting → "connecting…"
@@ -11,12 +11,12 @@
 // /plugins/lark-link/qr (the GUI markdown image sanitizer drops data: URLs,
 // and a plugin can't push over ctx.remote — so we poll a local image we own).
 //
-// Slot registration: `sidebar.footer.action` is a `list` slot (declared by
-// ui-sidebar); `register` takes the parent name + an entry `id`. The component
-// owns its open/close state; the popover is position:fixed and is rendered
-// through a React portal to document.body — it escapes the sidebar footer slot
-// container, so peer footer-slot plugins (e.g. dsh-cost-meter, which rewrites
-// that container's children/order) can never reshape or dislocate it.
+// Slot registration: the whole management surface used to be a sidebar-footer
+// popover (`sidebar.footer.action`) rendered through a body portal, because
+// peer footer-slot plugins rewrote that container and deformed it. It is now
+// its own `settings.section` page: the settings shell owns the layout, nothing
+// competes for the container, and the portal workaround is gone with the
+// sidebar entry.
 
 import type { Context } from "@deepseek-ai/cordis";
 
@@ -31,15 +31,6 @@ type ReactApi = {
 };
 const R = require("react") as ReactApi;
 const { createElement: h, useState, useEffect } = R;
-// render the popover through a portal to document.body so it escapes the
-// shared sidebar footer slot container. The sidebar.footer.action slot is a
-// LIST where other plugins (e.g. dsh-cost-meter) legitimately reorder the
-// container's children / rewrite its inline flex styles while watching it with
-// a MutationObserver — a popover left as a slot child gets reshuffled by that
-// churn and visibly deforms (GH issue #3). A body portal keeps it stable.
-const reactDom = require("react-dom") as {
-	createPortal?: (node: unknown, container: unknown) => unknown;
-};
 
 const win = globalThis as unknown as {
 	location?: { origin?: string };
@@ -51,18 +42,7 @@ const win = globalThis as unknown as {
 			body?: string;
 		},
 	) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
-	// Browser-only, used as the portal mount target. Kept out of the TS dom lib
-	// (this package's lib is ES2023); accessed lazily through globalThis.
-	document?: { body?: unknown } | null;
 };
-
-// If react-dom.createPortal is available (and we're in a browser), mount via a
-// body portal; otherwise fall back to rendering in place (older runtimes).
-const bodyEl = win.document?.body;
-const portalToBody =
-	bodyEl != null && reactDom.createPortal
-		? (node: unknown) => reactDom.createPortal!(node, bodyEl)
-		: (node: unknown) => node;
 
 export const name = "dsh-lark-link-client";
 export const inject = ["slots"];
@@ -262,8 +242,7 @@ const STATE_VIEW: Record<
 
 export function apply(ctx: ClientContext): void {
 	installLegacySettingsScope(ctx);
-	const SidebarAction = (): unknown => {
-		const [open, setOpen] = useState<boolean>(false);
+	const LarkLinkSection = (): unknown => {
 		const [st, setSt] = useState<StatusPayload | undefined>(undefined);
 		const [qrTs, setQrTs] = useState<number>(0);
 		const [qrLoaded, setQrLoaded] = useState<boolean>(false);
@@ -289,7 +268,6 @@ export function apply(ctx: ClientContext): void {
 
 
 		useEffect(() => {
-			if (!open) return;
 			const origin = win.location?.origin ?? "";
 			const fetchStatus = (): void => {
 				void win
@@ -344,7 +322,7 @@ export function apply(ctx: ClientContext): void {
 				clearInterval(stId);
 				clearInterval(qrId);
 			};
-		}, [open]);
+		}, []);
 
 		const state = deriveState(st);
 		const origin = win.location?.origin ?? "";
@@ -483,32 +461,6 @@ export function apply(ctx: ClientContext): void {
 				)
 				.finally(() => setPolicySaving(false));
 		};
-
-		const button = h(
-			"button",
-			{
-				type: "button",
-				title: "Lark Link",
-				onClick: () => setOpen((v) => !v),
-				style: {
-					display: "inline-flex",
-					alignItems: "center",
-					gap: "6px",
-					padding: "6px 10px",
-					border: "1px solid rgba(127,127,127,.25)",
-					borderRadius: "8px",
-					background: open ? "rgba(127,127,127,.18)" : "transparent",
-					color: "inherit",
-					cursor: "pointer",
-					fontSize: "13px",
-					lineHeight: 1,
-				},
-			},
-			"🪶",
-			"Lark",
-		);
-
-		if (!open) return button;
 
 		const view =
 			state === "loading"
@@ -1052,58 +1004,20 @@ export function apply(ctx: ClientContext): void {
 			"div",
 			{
 				style: {
-					position: "fixed",
-					top: "12px",
-					right: "12px",
-					zIndex: 2147483000,
-					minWidth: "300px",
-					maxWidth: "360px",
-					maxHeight: "calc(100vh - 24px)",
-					overflowY: "auto",
-					padding: "14px 16px",
-					background: "rgba(24,26,32,.97)",
-					color: "#e6e8eb",
-					border: "1px solid rgba(255,255,255,.16)",
-					borderRadius: "12px",
-					boxShadow: "0 16px 48px rgba(0,0,0,.5)",
+					display: "flex",
+					flexDirection: "column",
+					width: "100%",
+					maxWidth: "760px",
+					color: "inherit",
 					fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
 					fontSize: "12px",
 					lineHeight: 1.5,
 				},
 			},
 			h(
-				"div",
-				{
-					style: {
-						display: "flex",
-						justifyContent: "space-between",
-						alignItems: "center",
-						marginBottom: "10px",
-					},
-				},
-				h("strong", { style: { fontSize: "13px" } }, "🪶 Lark Link"),
-				h(
-					"button",
-					{
-						type: "button",
-						onClick: () => {
-							setOpen(false);
-							setManualOpen(false);
-							setAppSecret("");
-							setManualError("");
-						},
-						style: {
-							background: "transparent",
-							border: "none",
-							color: "#9aa0a6",
-							cursor: "pointer",
-							fontSize: "16px",
-							lineHeight: 1,
-						},
-						title: "关闭",
-					},
-					"×",
-				),
+				"strong",
+				{ style: { fontSize: "13px", marginBottom: "10px" } },
+				"🪶 Lark Link",
 			),
 			banner,
 			hint,
@@ -1120,22 +1034,22 @@ export function apply(ctx: ClientContext): void {
 			footer,
 		);
 
-		// The popover goes through portalToBody (document.body) so another
-		// footer-slot plugin (dsh-cost-meter) reordering the shared sidebar
-		// footer container can never dislocate or deform it. Only the trigger
-		// button stays inside the sidebar footer slot.
-		return h("div", null, button, portalToBody(panel));
+		return panel;
 	};
 
-	ctx.slots.inject("sidebar.footer.action", () =>
+	// The whole management surface — QR setup, credentials, users, policy and the
+	// model catalogue — lives in its own settings section. It used to be a
+	// sidebar-footer popover; the sidebar entry is gone, so this section is the
+	// only way in and always renders its content (no open/close state).
+	ctx.slots.inject("settings.section", () =>
 		ctx.slots.register(
 			{
-				name: "sidebar.footer.action",
-				id: "lark-link-entry",
-				order: 100,
+				name: "settings.section",
+				id: "lark-link",
+				order: 45,
 				label: "Lark Link",
 			},
-			SidebarAction,
+			LarkLinkSection,
 		),
 	);
 }

@@ -6,10 +6,7 @@ window.__ModuleLoader__.load({
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 		//#region src/client/index.ts
 		const { createElement: h, useState, useEffect } = require("react");
-		const reactDom = require("react-dom");
 		const win = globalThis;
-		const bodyEl = win.document?.body;
-		const portalToBody = bodyEl != null && reactDom.createPortal ? (node) => reactDom.createPortal(node, bodyEl) : (node) => node;
 		const name = "dsh-lark-link-client";
 		const inject = ["slots"];
 		/**
@@ -108,8 +105,7 @@ window.__ModuleLoader__.load({
 		};
 		function apply(ctx) {
 			installLegacySettingsScope(ctx);
-			const SidebarAction = () => {
-				const [open, setOpen] = useState(false);
+			const LarkLinkSection = () => {
 				const [st, setSt] = useState(void 0);
 				const [qrTs, setQrTs] = useState(0);
 				const [qrLoaded, setQrLoaded] = useState(false);
@@ -129,7 +125,6 @@ window.__ModuleLoader__.load({
 				const [effectiveDefaultModel, setEffectiveDefaultModel] = useState("");
 				const [modelCatalog, setModelCatalog] = useState([]);
 				useEffect(() => {
-					if (!open) return;
 					const origin = win.location?.origin ?? "";
 					const fetchStatus = () => {
 						win.fetch?.(`${origin}/plugins/lark-link/status`).then((r) => r.ok ? r.json() : Promise.reject(/* @__PURE__ */ new Error("status"))).then((j) => setSt(j)).catch(() => setSt((prev) => prev));
@@ -162,7 +157,7 @@ window.__ModuleLoader__.load({
 						clearInterval(stId);
 						clearInterval(qrId);
 					};
-				}, [open]);
+				}, []);
 				const state = deriveState(st);
 				const origin = win.location?.origin ?? "";
 				const showQr = state === "setup";
@@ -252,25 +247,6 @@ window.__ModuleLoader__.load({
 						setManualNotice("模型访问策略和默认工作区已保存。下一轮请求生效。");
 					}).catch((error) => setManualError(error instanceof Error ? error.message : "策略保存失败")).finally(() => setPolicySaving(false));
 				};
-				const button = h("button", {
-					type: "button",
-					title: "Lark Link",
-					onClick: () => setOpen((v) => !v),
-					style: {
-						display: "inline-flex",
-						alignItems: "center",
-						gap: "6px",
-						padding: "6px 10px",
-						border: "1px solid rgba(127,127,127,.25)",
-						borderRadius: "8px",
-						background: open ? "rgba(127,127,127,.18)" : "transparent",
-						color: "inherit",
-						cursor: "pointer",
-						fontSize: "13px",
-						lineHeight: 1
-					}
-				}, "🪶", "Lark");
-				if (!open) return button;
 				const view = state === "loading" ? {
 					emoji: "…",
 					label: "读取状态",
@@ -583,55 +559,26 @@ window.__ModuleLoader__.load({
 					fontSize: "11px",
 					lineHeight: 1.6
 				} }, "可在本面板手动更新凭据，或使用 /lark setup 扫码配置", h("br"), "详情与全链路：/lark status");
-				const panel = h("div", { style: {
-					position: "fixed",
-					top: "12px",
-					right: "12px",
-					zIndex: 2147483e3,
-					minWidth: "300px",
-					maxWidth: "360px",
-					maxHeight: "calc(100vh - 24px)",
-					overflowY: "auto",
-					padding: "14px 16px",
-					background: "rgba(24,26,32,.97)",
-					color: "#e6e8eb",
-					border: "1px solid rgba(255,255,255,.16)",
-					borderRadius: "12px",
-					boxShadow: "0 16px 48px rgba(0,0,0,.5)",
+				return h("div", { style: {
+					display: "flex",
+					flexDirection: "column",
+					width: "100%",
+					maxWidth: "760px",
+					color: "inherit",
 					fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
 					fontSize: "12px",
 					lineHeight: 1.5
-				} }, h("div", { style: {
-					display: "flex",
-					justifyContent: "space-between",
-					alignItems: "center",
+				} }, h("strong", { style: {
+					fontSize: "13px",
 					marginBottom: "10px"
-				} }, h("strong", { style: { fontSize: "13px" } }, "🪶 Lark Link"), h("button", {
-					type: "button",
-					onClick: () => {
-						setOpen(false);
-						setManualOpen(false);
-						setAppSecret("");
-						setManualError("");
-					},
-					style: {
-						background: "transparent",
-						border: "none",
-						color: "#9aa0a6",
-						cursor: "pointer",
-						fontSize: "16px",
-						lineHeight: 1
-					},
-					title: "关闭"
-				}, "×")), banner, hint, credentialSummary, controls, notice, policyToggle, policyForm, manualToggle, manualForm, userPanel, qrImg, qrHint, footer);
-				return h("div", null, button, portalToBody(panel));
+				} }, "🪶 Lark Link"), banner, hint, credentialSummary, controls, notice, policyToggle, policyForm, manualToggle, manualForm, userPanel, qrImg, qrHint, footer);
 			};
-			ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
-				name: "sidebar.footer.action",
-				id: "lark-link-entry",
-				order: 100,
+			ctx.slots.inject("settings.section", () => ctx.slots.register({
+				name: "settings.section",
+				id: "lark-link",
+				order: 45,
 				label: "Lark Link"
-			}, SidebarAction));
+			}, LarkLinkSection));
 		}
 		//#endregion
 		exports.apply = apply;
