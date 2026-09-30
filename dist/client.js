@@ -98,7 +98,7 @@ window.__ModuleLoader__.load({
 			error: {
 				emoji: "🔴",
 				label: "连接异常",
-				color: "#ff8a80",
+				color: "var(--dsw-alias-label-primary, #1f2937)",
 				bg: "rgba(255,138,128,.12)",
 				hint: "/lark restart 重连 · /lark status 查看详情"
 			}
@@ -250,7 +250,7 @@ window.__ModuleLoader__.load({
 				const view = state === "loading" ? {
 					emoji: "…",
 					label: "读取状态",
-					color: "#9aa0a6",
+					color: "var(--dsw-alias-label-primary, #1f2937)",
 					bg: "rgba(255,255,255,.05)",
 					hint: ""
 				} : STATE_VIEW[state];
@@ -266,7 +266,7 @@ window.__ModuleLoader__.load({
 					marginBottom: "10px",
 					background: view.bg,
 					borderRadius: "8px",
-					color: view.color,
+					color: "var(--dsw-alias-label-primary, #1f2937)",
 					fontWeight: 600
 				} }, h("span", { style: { fontSize: "16px" } }, view.emoji), h("span", null, view.label), extras.length ? h("span", { style: {
 					marginLeft: "auto",
@@ -290,8 +290,8 @@ window.__ModuleLoader__.load({
 					padding: "7px 8px",
 					border: "1px solid rgba(255,255,255,.18)",
 					borderRadius: "7px",
-					background: "rgba(255,255,255,.06)",
-					color: "inherit",
+					background: "var(--dsw-alias-bg-module-platform, #eef1f6)",
+					color: "var(--dsw-alias-label-primary, #1f2937)",
 					font: "inherit"
 				};
 				const manualToggle = h("button", {
@@ -307,7 +307,7 @@ window.__ModuleLoader__.load({
 						border: "1px solid rgba(127,209,255,.4)",
 						borderRadius: "7px",
 						background: "rgba(127,209,255,.1)",
-						color: "#b9e6ff",
+						color: "var(--dsw-alias-label-primary, #1f2937)",
 						cursor: "pointer",
 						font: "inherit"
 					}
@@ -319,7 +319,7 @@ window.__ModuleLoader__.load({
 					marginBottom: "10px",
 					border: "1px solid rgba(255,255,255,.12)",
 					borderRadius: "8px",
-					background: "rgba(0,0,0,.18)"
+					background: "var(--dsw-alias-bg-layer-1, #ffffff)"
 				} }, h("label", null, "App ID"), h("input", {
 					type: "text",
 					value: appId,
@@ -341,7 +341,7 @@ window.__ModuleLoader__.load({
 					onChange: (event) => setDomain(valueOf(event) === "lark" ? "lark" : "feishu"),
 					style: fieldStyle
 				}, h("option", { value: "feishu" }, "飞书（中国大陆）"), h("option", { value: "lark" }, "Lark（国际版）")), manualError ? h("div", { style: {
-					color: "#ff8a80",
+					color: "var(--dsw-alias-label-primary, #1f2937)",
 					whiteSpace: "pre-wrap"
 				} }, manualError) : null, h("button", {
 					type: "button",
@@ -351,7 +351,7 @@ window.__ModuleLoader__.load({
 						padding: "8px 10px",
 						border: "none",
 						borderRadius: "7px",
-						background: "#3370ff",
+						background: "#2455db",
 						color: "white",
 						cursor: manualSaving ? "default" : "pointer",
 						opacity: manualSaving ? .65 : 1,
@@ -365,10 +365,10 @@ window.__ModuleLoader__.load({
 					style: {
 						flex: 1,
 						padding: "6px 7px",
-						border: "1px solid rgba(255,255,255,.16)",
+						border: "1px solid var(--dsw-alias-border-l3, #c8cdd8)",
 						borderRadius: "7px",
-						background: "rgba(255,255,255,.06)",
-						color: "inherit",
+						background: "var(--dsw-alias-bg-module-platform, #eef1f6)",
+						color: "var(--dsw-alias-label-primary, #1f2937)",
 						cursor: controlBusy ? "default" : "pointer",
 						font: "inherit"
 					}
@@ -383,7 +383,7 @@ window.__ModuleLoader__.load({
 					padding: "8px",
 					borderRadius: "7px",
 					background: "rgba(126,226,168,.1)",
-					color: "#9bf0bb"
+					color: "var(--dsw-alias-label-primary, #1f2937)"
 				} }, manualNotice) : null;
 				const flatModels = modelCatalog.flatMap((group) => group.models.map((model) => ({
 					ref: `${group.provider}/${model.id}`,
@@ -402,7 +402,7 @@ window.__ModuleLoader__.load({
 						border: "1px solid rgba(126,226,168,.4)",
 						borderRadius: "7px",
 						background: "rgba(126,226,168,.1)",
-						color: "#9bf0bb",
+						color: "var(--dsw-alias-label-primary, #1f2937)",
 						cursor: "pointer",
 						font: "inherit"
 					}
@@ -415,7 +415,7 @@ window.__ModuleLoader__.load({
 					marginBottom: "10px",
 					border: "1px solid rgba(255,255,255,.12)",
 					borderRadius: "8px",
-					background: "rgba(0,0,0,.18)"
+					background: "var(--dsw-alias-bg-layer-1, #ffffff)"
 				} }, h("label", { style: {
 					display: "flex",
 					gap: "7px",
@@ -445,7 +445,7 @@ window.__ModuleLoader__.load({
 					maxHeight: "170px",
 					overflowY: "auto",
 					padding: "4px 6px",
-					border: "1px solid rgba(255,255,255,.1)",
+					border: "1px solid var(--dsw-alias-border-l3, #c8cdd8)",
 					borderRadius: "6px"
 				} }, ...flatModels.map((model) => h("label", {
 					key: model.ref,
@@ -500,7 +500,7 @@ window.__ModuleLoader__.load({
 						padding: "8px 10px",
 						border: "none",
 						borderRadius: "7px",
-						background: "#3370ff",
+						background: "#2455db",
 						color: "white",
 						cursor: policySaving || !policyDraft.dirty ? "default" : "pointer",
 						opacity: policySaving || !policyDraft.dirty ? .55 : 1,
@@ -511,7 +511,7 @@ window.__ModuleLoader__.load({
 					key: user.sessionKey,
 					style: {
 						padding: "7px 0",
-						borderTop: "1px solid rgba(255,255,255,.08)"
+						borderTop: "1px solid var(--dsw-alias-border-l2, #d8dce4)"
 					}
 				}, h("div", { style: {
 					fontWeight: 600,
@@ -554,7 +554,7 @@ window.__ModuleLoader__.load({
 				const footer = h("div", { style: {
 					marginTop: "6px",
 					paddingTop: "8px",
-					borderTop: "1px solid rgba(255,255,255,.08)",
+					borderTop: "1px solid var(--dsw-alias-border-l2, #d8dce4)",
 					opacity: .6,
 					fontSize: "11px",
 					lineHeight: 1.6
@@ -564,7 +564,7 @@ window.__ModuleLoader__.load({
 					flexDirection: "column",
 					width: "100%",
 					maxWidth: "760px",
-					color: "inherit",
+					color: "var(--dsw-alias-label-primary, #1f2937)",
 					fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
 					fontSize: "12px",
 					lineHeight: 1.5
