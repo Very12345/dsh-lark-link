@@ -215,7 +215,7 @@ const STATE_VIEW: Record<
 		label: "已配置 · 待启动",
 		color: "#7fd1ff",
 		bg: "rgba(127,209,255,.12)",
-		hint: "在输入框运行 /lark start 启动桥接",
+		hint: "开启桥接后，即可从飞书与助手对话。",
 	},
 	connecting: {
 		emoji: "🟡",
@@ -229,7 +229,7 @@ const STATE_VIEW: Record<
 		label: "运行中",
 		color: "#7ee2a8",
 		bg: "rgba(126,226,168,.12)",
-		hint: "/lark stop · /lark restart · 发消息即可对话",
+		hint: "连接正常，飞书消息会进入当前桥接。",
 	},
 	error: {
 		emoji: "🔴",
@@ -239,6 +239,8 @@ const STATE_VIEW: Record<
 		hint: "/lark restart 重连 · /lark status 查看详情",
 	},
 };
+
+const SETTINGS_CSS = "\n.dshp-page{--sp-text:var(--dsw-alias-label-primary,#20242c);--sp-muted:var(--dsw-alias-label-secondary,#69717f);--sp-border:var(--dsw-alias-border-l3,#e4e7ec);--sp-bg:var(--dsw-alias-bg-layer-2,#fff);--sp-soft:var(--dsw-alias-bg-layer-3,#f7f8fa);--sp-accent:#3d64df;color:var(--sp-text);width:100%;max-width:720px;padding:12px 0 32px;font-family:inherit;font-size:14px;line-height:1.5}\n.dshp-page *{box-sizing:border-box}.dshp-header{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:28px}.dshp-title{display:flex;align-items:center;gap:14px}.dshp-symbol{display:grid;place-items:center;flex:none;width:44px;height:44px;border:1px solid var(--sp-border);border-radius:13px;background:var(--sp-soft);font-size:20px}.dshp-page h2{font-size:22px;font-weight:650;line-height:1.35;letter-spacing:-.4px;margin:0}.dshp-subtitle{color:var(--sp-muted);font-size:13px;margin:5px 0 0}.dshp-status{display:inline-flex;align-items:center;gap:7px;color:var(--sp-muted);font-size:12px;white-space:nowrap;border:1px solid var(--sp-border);border-radius:20px;padding:5px 10px}.dshp-dot{width:6px;height:6px;flex:none;border-radius:50%;background:#969eab}.dshp-status[data-ok=true] .dshp-dot{background:#21936a}.dshp-status[data-warn=true] .dshp-dot{background:#c58c2e}\n.dshp-section{margin-top:26px}.dshp-heading{color:var(--sp-muted);font-weight:600;font-size:13px;margin:0 0 10px}.dshp-panel{background:var(--sp-bg);border:1px solid var(--sp-border);border-radius:12px;overflow:hidden}.dshp-row{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:20px}.dshp-row+.dshp-row{border-top:1px solid var(--sp-border)}.dshp-label{font-weight:550;font-size:14px;margin:0}.dshp-help{font-size:12px;color:var(--sp-muted);line-height:1.65;margin:4px 0 0}.dshp-page button,.dshp-page input,.dshp-page select{font:inherit}.dshp-page button{cursor:pointer}.dshp-page button:disabled{cursor:default;opacity:.45}.dshp-page button:focus-visible,.dshp-page input:focus-visible,.dshp-page select:focus-visible{outline:3px solid #8ba9ff;outline-offset:3px}.dshp-switch{position:relative;flex:none;width:40px;height:24px;border:0;border-radius:20px;padding:3px;background:#a0a7b2}.dshp-switch[aria-checked=true]{background:var(--sp-accent)}.dshp-knob{display:block;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0002;transform:translateX(0);transition:transform .15s}.dshp-switch[aria-checked=true] .dshp-knob{transform:translateX(16px)}\n.dshp-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap;border:1px solid var(--sp-border);background:var(--sp-bg);color:var(--sp-text);border-radius:7px;padding:7px 12px;font-size:12px!important}.dshp-button:hover{background:var(--sp-soft)}.dshp-primary{background:var(--sp-accent)!important;border-color:var(--sp-accent)!important;color:white!important}.dshp-danger{color:var(--dsw-alias-label-error,#c73f38)}.dshp-footnote{color:var(--sp-muted);font-size:12px;line-height:1.65;margin:12px 2px 0}.dshp-error{color:var(--dsw-alias-label-error,#c73f38);background:var(--sp-soft);border:1px solid var(--sp-border);padding:12px 14px;border-radius:8px;font-size:12px;margin-top:14px}.dshp-footer{font-size:11px;color:var(--sp-muted);margin-top:18px}.dshp-empty{font-size:12px;color:var(--sp-muted);padding:20px}.dshp-option{width:100%;display:flex;align-items:center;gap:12px;text-align:left;padding:14px;border:1px solid transparent;background:transparent;color:var(--sp-text);border-radius:8px}.dshp-option[aria-checked=true]{background:var(--sp-soft);border-color:var(--sp-border)}.dshp-option-copy{flex:1}.dshp-radio{width:16px;height:16px;border:1.5px solid #9ca5b3;border-radius:50%;display:grid;place-items:center;flex:none}.dshp-option[aria-checked=true] .dshp-radio{border-color:var(--sp-accent)}.dshp-option[aria-checked=true] .dshp-radio:after{content:'';width:8px;height:8px;border-radius:50%;background:var(--sp-accent)}.dshp-options{padding:6px}.dshp-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.dshp-tags{display:flex;gap:7px;flex-wrap:wrap}.dshp-tag{font-size:12px;color:var(--sp-muted);background:var(--sp-soft);border:1px solid var(--sp-border);padding:4px 9px;border-radius:6px}.dshp-form{padding:20px;border-top:1px solid var(--sp-border);display:grid;gap:12px}.dshp-page input:not([type=checkbox]),.dshp-page select{min-height:36px;border:1px solid var(--sp-border)!important;border-radius:7px!important;background:var(--sp-bg)!important;color:var(--sp-text)!important;padding:7px 10px!important;font:inherit!important}.dshp-page input[type=checkbox]{accent-color:var(--sp-accent);width:15px;height:15px;flex:none}.dshp-disclosure{width:100%;display:flex;align-items:center;justify-content:space-between;gap:16px;text-align:left;background:transparent;border:0;color:var(--sp-text);padding:20px;font-size:14px;font-weight:550}.dshp-disclosure span:last-child{color:var(--sp-muted)}.dshp-user{padding:14px 20px}.dshp-user+.dshp-user{border-top:1px solid var(--sp-border)}.dshp-user summary{cursor:pointer;list-style:none}.dshp-user summary::-webkit-details-marker{display:none}.dshp-user summary:after{content:'\u203a';float:right;color:var(--sp-muted)}.dshp-user[open] summary:after{content:'\u2304'}.dshp-user-meta{color:var(--sp-muted);font-size:12px;overflow-wrap:anywhere;margin-top:6px}\n@media(max-width:520px){.dshp-page h2{font-size:20px}.dshp-header{align-items:flex-start;gap:10px}.dshp-subtitle{max-width:220px}.dshp-symbol{width:38px;height:38px}.dshp-row,.dshp-form,.dshp-disclosure{padding:16px}.dshp-row{gap:12px}.dshp-status{font-size:11px}}\n@media(prefers-reduced-motion:reduce){.dshp-knob{transition:none}}\n";
 
 export function apply(ctx: ClientContext): void {
 	installLegacySettingsScope(ctx);
@@ -481,52 +483,8 @@ export function apply(ctx: ClientContext): void {
 		if (st?.inboundFailed && st.inboundFailed > 0)
 			extras.push(`补发失败 ${st.inboundFailed}`);
 
-		const banner = h(
-			"div",
-			{
-				style: {
-					display: "flex",
-					alignItems: "center",
-					gap: "8px",
-					padding: "10px 12px",
-					marginBottom: "10px",
-					background: view.bg,
-					borderRadius: "8px",
-					color: "var(--dsw-alias-label-primary, #1f2937)",
-					fontWeight: 600,
-				},
-			},
-			h("span", { style: { fontSize: "16px" } }, view.emoji),
-			h("span", null, view.label),
-			extras.length
-				? h(
-						"span",
-						{
-							style: {
-								marginLeft: "auto",
-								fontWeight: 400,
-								opacity: 0.8,
-								fontSize: "11px",
-							},
-						},
-						extras.join(" · "),
-					)
-				: null,
-		);
+        const banner = h('span',{className:'dshp-status','data-ok':state==='running','data-warn':state==='connecting'||state==='error'},h('span',{className:'dshp-dot'}),view.label);
 
-		const hint = view.hint
-			? h(
-					"div",
-					{
-						style: {
-							opacity: 0.8,
-							marginBottom: "10px",
-							whiteSpace: "pre-wrap",
-						},
-					},
-					view.hint,
-				)
-			: null;
 
 		const credentialSummary = st?.appIdMasked
 			? h(
@@ -535,7 +493,7 @@ export function apply(ctx: ClientContext): void {
 						style: {
 							marginBottom: "10px",
 							opacity: 0.75,
-							fontSize: "11px",
+							fontSize: "12px",
 						},
 					},
 					`当前：${st.appIdMasked} · ${st.domain === "lark" ? "Lark" : "飞书"}${instanceHost ? ` · 主机 ${instanceHost}` : ""}`,
@@ -545,34 +503,14 @@ export function apply(ctx: ClientContext): void {
 			boxSizing: "border-box",
 			width: "100%",
 			padding: "7px 8px",
-			border: "1px solid rgba(255,255,255,.18)",
+			border: "1px solid var(--dsw-alias-border-l3, #e4e7ec)",
 			borderRadius: "7px",
-			background: "var(--dsw-alias-bg-module-platform, #eef1f6)",
+			background: "var(--dsw-alias-bg-layer-2, #fff)",
 			color: "var(--dsw-alias-label-primary, #1f2937)",
 			font: "inherit",
 		};
-		const manualToggle = h(
-			"button",
-			{
-				type: "button",
-				onClick: () => {
-					setManualOpen((value) => !value);
-					setManualError("");
-				},
-				style: {
-					width: "100%",
-					padding: "7px 9px",
-					marginBottom: "10px",
-					border: "1px solid rgba(127,209,255,.4)",
-					borderRadius: "7px",
-					background: "rgba(127,209,255,.1)",
-					color: "var(--dsw-alias-label-primary, #1f2937)",
-					cursor: "pointer",
-					font: "inherit",
-				},
-			},
-			manualOpen ? "取消手动配置" : "手动配置 App ID / App Secret",
-		);
+        const manualToggle=h('button',{type:'button',className:'dshp-disclosure','aria-expanded':manualOpen,onClick:()=>{setManualOpen(v=>!v);setManualError('');}},h('span',null,'机器人凭据'),h('span',null,manualOpen?'⌄':'›'));
+
 		const manualForm = manualOpen
 			? h(
 					"div",
@@ -587,9 +525,10 @@ export function apply(ctx: ClientContext): void {
 							background: "var(--dsw-alias-bg-layer-1, #ffffff)",
 						},
 					},
-					h("label", null, "App ID"),
+					h("label", {htmlFor:"lark-app-id"}, "App ID"),
 					h("input", {
 						type: "text",
+                        id:"lark-app-id",
 						value: appId,
 						autoComplete: "off",
 						spellCheck: false,
@@ -597,9 +536,10 @@ export function apply(ctx: ClientContext): void {
 						onChange: (event: unknown) => setAppId(valueOf(event)),
 						style: fieldStyle,
 					}),
-					h("label", null, "App Secret"),
+					h("label", {htmlFor:"lark-app-secret"}, "App Secret"),
 					h("input", {
 						type: "password",
+                        id:"lark-app-secret",
 						value: appSecret,
 						autoComplete: "new-password",
 						spellCheck: false,
@@ -607,11 +547,12 @@ export function apply(ctx: ClientContext): void {
 						onChange: (event: unknown) => setAppSecret(valueOf(event)),
 						style: fieldStyle,
 					}),
-					h("label", null, "服务区域"),
+					h("label", {htmlFor:"lark-domain"}, "服务区域"),
 					h(
 						"select",
 						{
-							value: domain,
+							id:"lark-domain",
+                            value: domain,
 							onChange: (event: unknown) =>
 								setDomain(valueOf(event) === "lark" ? "lark" : "feishu"),
 							style: fieldStyle,
@@ -636,7 +577,7 @@ export function apply(ctx: ClientContext): void {
 								padding: "8px 10px",
 								border: "none",
 								borderRadius: "7px",
-								background: "#2455db",
+								background: "#3d64df",
 								color: "white",
 								cursor: manualSaving ? "default" : "pointer",
 								opacity: manualSaving ? 0.65 : 1,
@@ -647,36 +588,7 @@ export function apply(ctx: ClientContext): void {
 					),
 				)
 			: null;
-		const controlButton = (
-			label: string,
-			action: "start" | "stop" | "restart",
-		): unknown =>
-			h(
-				"button",
-				{
-					type: "button",
-					disabled: Boolean(controlBusy),
-					onClick: () => runControl(action),
-					style: {
-						flex: 1,
-						padding: "6px 7px",
-						border: "1px solid var(--dsw-alias-border-l3, #c8cdd8)",
-						borderRadius: "7px",
-						background: "var(--dsw-alias-bg-module-platform, #eef1f6)",
-						color: "var(--dsw-alias-label-primary, #1f2937)",
-						cursor: controlBusy ? "default" : "pointer",
-						font: "inherit",
-					},
-				},
-				controlBusy === action ? "处理中…" : label,
-			);
-		const controls = h(
-			"div",
-			{ style: { display: "flex", gap: "6px", marginBottom: "10px" } },
-			controlButton("启动", "start"),
-			controlButton("停止", "stop"),
-			controlButton("重连", "restart"),
-		);
+
 		const notice = manualNotice
 			? h(
 					"div",
@@ -698,28 +610,8 @@ export function apply(ctx: ClientContext): void {
 				label: `${group.label || group.provider} · ${model.name || model.id}`,
 			})),
 		);
-		const policyToggle = h(
-			"button",
-			{
-				type: "button",
-				onClick: () => {
-					setPolicyOpen((value) => !value);
-					setManualError("");
-				},
-				style: {
-					width: "100%",
-					padding: "7px 9px",
-					marginBottom: "10px",
-					border: "1px solid rgba(126,226,168,.4)",
-					borderRadius: "7px",
-					background: "rgba(126,226,168,.1)",
-					color: "var(--dsw-alias-label-primary, #1f2937)",
-					cursor: "pointer",
-					font: "inherit",
-				},
-			},
-			policyOpen ? "收起模型与工作区设置" : "模型与工作区设置",
-		);
+        const policyToggle=h('button',{type:'button',className:'dshp-disclosure','aria-expanded':policyOpen,onClick:()=>{setPolicyOpen(v=>!v);setManualError('');}},h('span',null,'模型与工作区'),h('span',null,policyOpen?'⌄':'›'));
+
 		const selectableDefaults = flatModels.filter(
 			(model) =>
 				!policyDraft?.restricted ||
@@ -774,7 +666,7 @@ export function apply(ctx: ClientContext): void {
 						),
 						h(
 							"div",
-							{ style: { opacity: 0.65, fontSize: "10px" } },
+							{ style: { opacity: 0.65, fontSize: "12px" } },
 							"启用后，未勾选模型不会出现在 /model 中，直接指定也会被拒绝。",
 						),
 						policyDraft.restricted
@@ -835,11 +727,12 @@ export function apply(ctx: ClientContext): void {
 									),
 								)
 							: null,
-						h("label", null, "默认模型"),
+						h("label", {htmlFor:"lark-default-model"}, "默认模型"),
 						h(
 							"select",
 							{
-								value: policyDraft.defaultModel,
+								id:"lark-default-model",
+                                value: policyDraft.defaultModel,
 								onChange: (event: unknown) =>
 									setPolicyDraft((previous) =>
 										previous
@@ -865,10 +758,11 @@ export function apply(ctx: ClientContext): void {
 								h("option", { key: model.ref, value: model.ref }, model.label),
 							),
 						),
-						h("label", null, "默认工作区"),
+						h("label", {htmlFor:"lark-workspace"}, "默认工作区"),
 						h("input", {
 							type: "text",
-							value: policyDraft.workspaceRoot,
+							id:"lark-workspace",
+                                value: policyDraft.workspaceRoot,
 							placeholder: "留空则使用 DSH 进程工作目录",
 							onChange: (event: unknown) =>
 								setPolicyDraft((previous) =>
@@ -892,7 +786,7 @@ export function apply(ctx: ClientContext): void {
 									padding: "8px 10px",
 									border: "none",
 									borderRadius: "7px",
-									background: "#2455db",
+									background: "#3d64df",
 									color: "white",
 									cursor:
 										policySaving || !policyDraft.dirty ? "default" : "pointer",
@@ -904,53 +798,8 @@ export function apply(ctx: ClientContext): void {
 						),
 					)
 				: null;
-		const userRows = users.slice(0, 20).map((user) =>
-			h(
-				"div",
-				{
-					key: user.sessionKey,
-					style: {
-						padding: "7px 0",
-						borderTop: "1px solid var(--dsw-alias-border-l2, #d8dce4)",
-					},
-				},
-				h(
-					"div",
-					{ style: { fontWeight: 600, overflowWrap: "anywhere" } },
-					user.senderName || user.senderOpenId,
-				),
-				h(
-					"div",
-					{ style: { opacity: 0.65, fontSize: "10px", overflowWrap: "anywhere" } },
-					`${user.chatType} · ${user.chatId} · ${user.inboundMessages} 条 · ${new Date(user.lastSeenAt).toLocaleString()}`,
-				),
-				user.activeSessionId
-					? h(
-							"div",
-							{ style: { opacity: 0.55, fontSize: "10px", overflowWrap: "anywhere" } },
-							`会话：${user.activeSessionId}`,
-						)
-					: null,
-			),
-		);
-		const userPanel = h(
-			"div",
-			{
-				style: {
-					marginBottom: "10px",
-					maxHeight: "190px",
-					overflowY: "auto",
-				},
-			},
-			h(
-				"div",
-				{ style: { fontWeight: 600, marginBottom: "4px" } },
-				`用户与桥接链（${users.length}）`,
-			),
-			...(userRows.length
-				? userRows
-				: [h("div", { style: { opacity: 0.6 } }, "尚无当前机器人收到的消息")]),
-		);
+        const userRows=users.slice(0,20).map(user=>h('details',{className:'dshp-user',key:user.sessionKey},h('summary',null,h('span',{className:'dshp-label'},user.senderName||user.senderOpenId),h('div',{className:'dshp-help'},`${user.chatType==='p2p'?'私聊':'群聊'} · ${user.inboundMessages} 条消息`)),h('div',{className:'dshp-user-meta'},`聊天：${user.chatId}`),user.activeSessionId?h('div',{className:'dshp-user-meta'},`会话：${user.activeSessionId}`):null,h('div',{className:'dshp-user-meta'},`最近活跃：${new Date(user.lastSeenAt).toLocaleString()}`)));
+        const userPanel=h('section',{className:'dshp-section'},h('h3',{className:'dshp-heading'},`用户与对话 · ${users.length}`),h('div',{className:'dshp-panel'},...(userRows.length?userRows:[h('div',{className:'dshp-empty'},'还没有收到消息。连接后，在飞书中给机器人发送消息即可。')])));
 
 		// QR only while unconfigured; hidden (but fetched) until it loads.
 		const qrImg = showQr
@@ -976,63 +825,26 @@ export function apply(ctx: ClientContext): void {
 								textAlign: "center",
 								opacity: 0.6,
 								padding: "8px 0 12px",
-								fontSize: "11px",
+								fontSize: "12px",
 							},
 						},
 						"二维码生成中…（若无，确认已在输入框运行 /lark setup）",
 					)
 				: null;
 
-		const footer = h(
-			"div",
-			{
-				style: {
-					marginTop: "6px",
-					paddingTop: "8px",
-					borderTop: "1px solid var(--dsw-alias-border-l2, #d8dce4)",
-					opacity: 0.6,
-					fontSize: "11px",
-					lineHeight: 1.6,
-				},
-			},
-			"可在本面板手动更新凭据，或使用 /lark setup 扫码配置",
-			h("br"),
-			"详情与全链路：/lark status",
-		);
 
-		const panel = h(
-			"div",
-			{
-				style: {
-					display: "flex",
-					flexDirection: "column",
-					width: "100%",
-					maxWidth: "760px",
-					color: "var(--dsw-alias-label-primary, #1f2937)",
-					fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-					fontSize: "12px",
-					lineHeight: 1.5,
-				},
-			},
-			h(
-				"strong",
-				{ style: { fontSize: "13px", marginBottom: "10px" } },
-				"🪶 Lark Link",
-			),
-			banner,
-			hint,
-			credentialSummary,
-			controls,
-			notice,
-			policyToggle,
-			policyForm,
-			manualToggle,
-			manualForm,
-			userPanel,
-			qrImg,
-			qrHint,
-			footer,
-		);
+        const panel=h('section',{className:'dshp-page'},h('style',null,SETTINGS_CSS+`
+          .dshp-lark-form{padding:0 20px 20px}.dshp-lark-form>div{border:0!important;background:transparent!important;padding:0!important;margin:0!important;gap:12px!important}.dshp-lark-form>div>button{border-radius:7px!important;padding:8px 12px!important}.dshp-lark-form label{font-size:13px}.dshp-lark-form [style*="max-height"]{max-height:240px!important;border:1px solid var(--sp-border)!important;padding:10px!important}.dshp-lark-notice{padding:14px 20px}.dshp-qr{padding:20px;text-align:center}.dshp-qr img{border:1px solid var(--sp-border);border-radius:12px;padding:12px;background:white}.dshp-qr p{margin:0;font-size:12px;color:var(--sp-muted)}
+        `),
+          h('header',{className:'dshp-header'},h('div',{className:'dshp-title'},h('span',{className:'dshp-symbol'},h('svg',{width:22,height:22,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.7,'aria-hidden':true},h('path',{d:'M21 11a8 8 0 0 1-8 8H5l-3 3V11a9 9 0 0 1 19 0ZM7 10h9M7 14h6'}))),h('div',null,h('h2',null,'飞书 / Lark'),h('p',{className:'dshp-subtitle'},'把桌面助手连接到飞书对话。'))),banner),
+          h('div',{className:'dshp-panel'},h('div',{className:'dshp-row'},h('div',null,h('p',{className:'dshp-label'},'启用飞书桥接'),h('p',{className:'dshp-help'},st?.configured?'将收到的消息交给 DSH，并同步回复。':'先扫码或填写机器人凭据，再开启桥接。')),h('div',{className:'dshp-actions'},st?.configured?h('button',{type:'button',className:'dshp-button',disabled:!!controlBusy,onClick:()=>runControl('restart')},controlBusy==='restart'?'重连中…':'重新连接'):null,h('button',{type:'button',className:'dshp-switch',role:'switch','aria-label':'启用飞书桥接','aria-checked':state==='running'||state==='connecting',disabled:!st?.configured||!!controlBusy,onClick:()=>runControl(state==='running'||state==='connecting'?'stop':state==='error'?'restart':'start')},h('span',{className:'dshp-knob'})))),credentialSummary?h('div',{style:{padding:'0 20px 12px'}},credentialSummary):null,extras.length?h('div',{className:'dshp-row'},h('p',{className:'dshp-label'},'消息投递'),h('span',{className:'dshp-help'},extras.join(' · '))):null),
+          showQr?h('section',{className:'dshp-section'},h('h3',{className:'dshp-heading'},'扫码配置'),h('div',{className:'dshp-panel dshp-qr'},qrImg,qrHint,h('p',null,'使用手机飞书扫码，完成机器人配置。'))):null,
+          notice?h('div',{className:'dshp-lark-notice',role:'status'},notice):null,
+          h('section',{className:'dshp-section'},h('h3',{className:'dshp-heading'},'连接与账号'),h('div',{className:'dshp-panel'},manualToggle,manualForm?h('div',{className:'dshp-lark-form'},manualForm):null)),
+          h('section',{className:'dshp-section'},h('h3',{className:'dshp-heading'},'对话偏好'),h('div',{className:'dshp-panel'},policyToggle,policyForm?h('div',{className:'dshp-lark-form'},policyForm):null)),
+          userPanel,
+          manualError?h('div',{className:'dshp-error',role:'alert'},manualError):null,
+          h('div',{className:'dshp-footer'},'凭据和对话偏好在确认保存后生效。'));
 
 		return panel;
 	};
@@ -1047,7 +859,7 @@ export function apply(ctx: ClientContext): void {
 				name: "settings.section",
 				id: "lark-link",
 				order: 45,
-				label: "Lark Link",
+				label: "飞书 / Lark",
 			},
 			LarkLinkSection,
 		),
