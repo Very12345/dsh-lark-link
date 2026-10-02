@@ -7340,7 +7340,7 @@ function registerAppWithFetch() {
 		const baseUrl = "https://accounts.feishu.cn";
 		const larkBaseUrl = "https://accounts.larksuite.com";
 		const endpoint = "/oauth/v1/app/registration";
-		const beginRes = await postForm("https://accounts.feishu.cn/oauth/v1/app/registration", {
+		const beginRes = await postForm(baseUrl + endpoint, {
 			action: "begin",
 			archetype: "PersonalAgent",
 			auth_method: "client_secret",

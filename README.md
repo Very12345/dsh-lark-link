@@ -88,6 +88,8 @@ dsh plugin --profile desktop add github:Very12345/dsh-lark-link
 
 ## 开发与分发
 
+GitHub Actions 只用于推送和 PR 后的自动安装、类型检查、测试与构建；飞书桥接运行不依赖 GitHub Actions。开发用 DSH SDK 固定为同一版本，CI 使用锁文件执行 `npm ci`。
+
 ```sh
 npm install
 npm run check

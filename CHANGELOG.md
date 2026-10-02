@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-webagent.7
+
+- Pin the development DSH SDK packages to 0.2.0-rc.2 and regenerate the lockfile so a clean `npm ci` no longer mixes incompatible prerelease peers.
+- Align the settings title with the host's 18px heading and normal spacing.
+
 ## 0.5.4-webagent.52
 
 - Session logs are matched by SHAPE (`session[.<fmt>].jsonl.zstd`) instead of a fixed list. DSH's 0.2 line writes `session.v4.jsonl.zstd`, and the v3-only list made EVERY session look missing there: the Feishu `/manage` delete failed with 找不到该会话的持久化日志, the row came back after a refresh, and the archived-gate census reported the whole list as dangling. One matcher now covers v3/v4/future formats (a directory holding several resolves newest-first).
