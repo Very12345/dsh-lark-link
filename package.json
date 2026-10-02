@@ -1,6 +1,6 @@
 {
   "name": "@very12345/dsh-lark-link",
-  "version": "0.6.0-webagent.7",
+  "version": "0.6.0-webagent.8",
   "description": "Fork of dsh-lark-link — Feishu/Lark bridge for DeepSeek Harness with card streaming status, per-app isolation, multi-user management, session admin and site preview.",
   "type": "module",
   "license": "MIT",
@@ -151,7 +151,8 @@
     "README.md",
     "LICENSE",
     "NOTICE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "assets/settings-icon.svg"
   ],
   "scripts": {
     "dev:link": "node scripts/dev-link.mjs",

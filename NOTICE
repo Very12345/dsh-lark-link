@@ -43,3 +43,11 @@ Trademarks
 DeepSeek, Feishu and Lark are trademarks of their respective owners. This is a
 community plugin and is not affiliated with, endorsed by, or sponsored by
 DeepSeek, Feishu or Lark.
+
+Settings identity artwork
+-------------------------
+The Feishu identity paths are from the official Open Platform favicon:
+https://lf-package-cn.feishucdn.com/obj/feishu-static/lark/open/website/favicon-logo.svg
+The white app background is omitted and the paths are rendered in monochrome
+using the host theme. The geometry is unchanged. Feishu/Lark trademark and
+artwork rights remain with their respective owners.
