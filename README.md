@@ -88,7 +88,7 @@ dsh plugin --profile desktop add github:Very12345/dsh-lark-link
 
 ## 开发与分发
 
-安装、类型检查、测试与构建在本地执行，不再配置推送或 PR 后自动运行的 GitHub Actions CI，以避免消耗 Actions 额度。飞书桥接运行不依赖 GitHub Actions。开发用 DSH SDK 固定为同一版本，干净安装使用锁文件执行 `npm ci`。
+安装、类型检查、测试与构建在本地执行，不再配置 GitHub Actions 工作流，以避免消耗 Actions 额度。飞书桥接运行不依赖 GitHub Actions。开发用 DSH SDK 固定为同一版本，干净安装使用锁文件执行 `npm ci`。
 
 ```sh
 npm install

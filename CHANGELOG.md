@@ -4,7 +4,7 @@
 
 - Pin the development DSH SDK packages to 0.2.0-rc.2 and regenerate the lockfile so a clean `npm ci` no longer mixes incompatible prerelease peers.
 - Align the settings title with the host's 18px heading and normal spacing.
-- Remove automatic push/PR CI; keep local installation, type checking, tests and builds.
+- Remove CI and the unused npm publishing workflow; keep local installation, type checking, tests and builds.
 
 ## 0.5.4-webagent.52
 
