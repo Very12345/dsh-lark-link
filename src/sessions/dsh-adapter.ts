@@ -28,6 +28,8 @@ import type { TokenUsageSnapshot } from "../common/types.ts";
 
 export interface DshAdapterDeps {
 	ctx: Context;
+	/** Capabilities mounted only for agents created/resumed through this bridge. */
+	setupAgent?: (agentCtx: Context, key: string) => void | Promise<void>;
 	/** Stable session-id prefix so created sessions are bridge-owned. */
 	sessionPrefix: string;
 	/**
@@ -805,6 +807,7 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 					}
 				).tools?.register?.(askTool);
 			}
+			await deps.setupAgent?.(agentCtx, key);
 			return undefined; // void — disposer is agentCtx-scoped
 		};
 		if (pending) {

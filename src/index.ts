@@ -412,10 +412,12 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	const runNonce = `${Date.now().toString(36)}${Math.random()
 		.toString(36)
 		.slice(2, 6)}`;
+	let installBridgeAgentCapabilities: (agentCtx: Context) => void = () => {};
 	let backend: ReturnType<typeof createDshAdapter> | undefined;
 	try {
 		backend = createDshAdapter({
 			ctx,
+			setupAgent: (agentCtx) => installBridgeAgentCapabilities(agentCtx),
 			sessionPrefix: "lark-link",
 			runNonce,
 			logger,
@@ -4100,8 +4102,12 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		logger,
 	});
 
+	// These capabilities never enter the host/global tool or prompt layer.
+	installBridgeAgentCapabilities = (agentCtx) => {
+	const agentTools = agentCtx.get("tools");
+	if (!agentTools) throw new Error("Feishu agent tools service is unavailable");
 	// ---- tools ------------------------------------------------------------------
-	ctx.tools.register(
+	agentTools.register(
 		defineTool({
 			name: "lark_send_local_file",
 			description:
@@ -4202,11 +4208,11 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				},
 				}),
 				);
-				ctx.tools.register(
+				agentTools.register(
 				defineTool({
 				name: "lark_publish_site",
 				description:
-					"Publish a webpage/game/front-end artifact as a TEMPORARY public link the user can open on their phone, and deliver a Feishu site card. Provide ONE of: url (an http server already running, e.g. a dev server), port (its port), or dir (a built static directory — served by the bridge). The bridge owns the tunnel lifecycle: same target reuses the previous link, a dead tunnel is refreshed with a new link, a different target replaces the old one. Links expire after ~2h. Works from ANY session; the site card is only delivered when the session is bound to a Feishu chat — otherwise use the returned link in your reply.",
+					"Publish a webpage/game/front-end artifact as a TEMPORARY public link the user can open on their phone, and deliver a Feishu site card. Provide ONE of: url (an http server already running, e.g. a dev server), port (its port), or dir (a built static directory — served by the bridge). The bridge owns the tunnel lifecycle: same target reuses the previous link, a dead tunnel is refreshed with a new link, a different target replaces the old one. Links expire after ~2h. Available only in a session started or resumed through Feishu. Deliver the site card to that bound chat.",
 				parameters: {
 					url: { type: "string", description: "http(s) URL already reachable from this host" },
 					port: { type: "number", description: "port of an already-running local server" },
@@ -4219,11 +4225,9 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				},
 				async execute(args, exec) {
 					const sessionId = (exec as { agent?: { id?: string } }).agent?.id ?? "";
-					// A Feishu route is OPTIONAL here: publishing a public link is
-					// useful from the DSH Web GUI too, and it must still work for a
-					// Feishu task whose reverse-map entry is gone (resumed task /
-					// disposed idle agent). Only the CARD needs a chat.
+					// Publishing and delivery belong to the bound Feishu dialogue.
 					const route = routeForSessionId(sessionId);
+					if (!route) return "错误: 当前会话未绑定飞书对话，不能发布飞书网站预览";
 					const convKey =
 						route?.sessionKey ??
 						(conversationKeyForSessionId(sessionId) || sessionId);
@@ -4265,7 +4269,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				},
 				}),
 				);
-	ctx.tools.register(
+	agentTools.register(
 		defineTool({
 			name: "lark_config_get",
 			description: "Read bridge config (hot-reloadable keys).",
@@ -4274,11 +4278,30 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				schema: { type: "string" },
 				render: (_a, v) => [{ type: "text", text: v as string }],
 			},
-			async execute() {
+			async execute(_args, exec) {
+				if (!routeForSessionId(exec.agent?.id ?? "")) return "错误: 当前会话未绑定飞书对话";
 				return JSON.stringify(getCfg(), null, 2);
 			},
 		}),
 	);
+
+	// ---- system prompt section ---------------------------------------------------
+	try {
+		agentCtx.get("systemPrompt")?.section({
+			name: "lark-link:bridge-channel",
+			order: 200,
+			text: [
+					"你正在通过飞书/Lark 桥接与用户对话。",
+					"可用工具: lark_send_local_file（发送本地文件到当前飞书会话）、lark_publish_site（把网页/游戏/前端产物发布成临时公网链接并给用户发网站卡片）、lark_config_get（读取桥配置）。",
+					"需要让用户临时查看网页/游戏/前端产物时，调用 lark_publish_site：dev server 跑起来后传 port=<端口>；纯静态产物传 dir=<构建产物目录>。工具会自动管理隧道生命周期（相同目标自动复用旧链接）并把网站卡片发给用户；不要自己拼公网链接，也不要重复发布相同目标。",
+					"回复要简洁；长输出会自动流式呈现给用户。",
+				].join("\n"),
+		});
+	} catch {
+		// prompt section optional
+	}
+
+	};
 
 	// ---- commands (DSH-side /lark-*) -------------------------------------------
 	const commandsCtx = ctx as unknown as {
@@ -4680,26 +4703,6 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		}
 		return `已清除凭据（ref=${ref}）并清理状态目录 ${dir}。重新使用请运行 /lark setup。`;
 	};
-
-	// ---- system prompt section ---------------------------------------------------
-	try {
-		(
-			ctx as unknown as { systemPrompt?: { section(s: unknown): void } }
-		).systemPrompt?.section?.({
-			priority: 200,
-			section: () => ({
-				role: "system",
-				content: [
-					"你正在通过飞书/Lark 桥接与用户对话。",
-					"可用工具: lark_send_local_file（发送本地文件到当前飞书会话）、lark_publish_site（把网页/游戏/前端产物发布成临时公网链接并给用户发网站卡片）、lark_config_get（读取桥配置）。",
-					"需要让用户临时查看网页/游戏/前端产物时，调用 lark_publish_site：dev server 跑起来后传 port=<端口>；纯静态产物传 dir=<构建产物目录>。工具会自动管理隧道生命周期（相同目标自动复用旧链接）并把网站卡片发给用户；不要自己拼公网链接，也不要重复发布相同目标。",
-					"回复要简洁；长输出会自动流式呈现给用户。",
-				].join("\n"),
-			}),
-		});
-	} catch {
-		// prompt section optional
-	}
 
 	// ---- lifecycle registration (Cordis disposer — clean unload) ----------------
 	ctx.effect(() => {

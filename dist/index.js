@@ -409,6 +409,7 @@ function createDshAdapter(deps) {
 					});
 					agentCtx.tools?.register?.(askTool);
 				}
+				await deps.setupAgent?.(agentCtx, key);
 			};
 			if (pending) {
 				await releaseLiveSession(pending.sessionId);
@@ -7811,10 +7812,12 @@ function apply(ctx, rawConfig) {
 		return m;
 	};
 	const runNonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+	let installBridgeAgentCapabilities = () => {};
 	let backend;
 	try {
 		backend = createDshAdapter({
 			ctx,
+			setupAgent: (agentCtx) => installBridgeAgentCapabilities(agentCtx),
 			sessionPrefix: "lark-link",
 			runNonce,
 			logger,
@@ -10228,148 +10231,166 @@ function apply(ctx, rawConfig) {
 		stateDir: stateDir(),
 		logger
 	});
-	ctx.tools.register(defineTool({
-		name: "lark_send_local_file",
-		description: "Send a local file or image to the current Feishu chat. Feishu-only: it needs the session to be bound to a Feishu conversation, so it fails in the DSH Web GUI.",
-		parameters: {
-			path: {
-				type: "string",
-				required: true,
-				description: "Absolute local path"
+	installBridgeAgentCapabilities = (agentCtx) => {
+		const agentTools = agentCtx.get("tools");
+		if (!agentTools) throw new Error("Feishu agent tools service is unavailable");
+		agentTools.register(defineTool({
+			name: "lark_send_local_file",
+			description: "Send a local file or image to the current Feishu chat. Feishu-only: it needs the session to be bound to a Feishu conversation, so it fails in the DSH Web GUI.",
+			parameters: {
+				path: {
+					type: "string",
+					required: true,
+					description: "Absolute local path"
+				},
+				kind: {
+					type: "string",
+					required: true,
+					description: "image（png/jpeg/webp/gif，其他格式如 svg 自动按 file 发送）| file"
+				},
+				caption: {
+					type: "string",
+					description: "Optional caption text"
+				}
 			},
-			kind: {
-				type: "string",
-				required: true,
-				description: "image（png/jpeg/webp/gif，其他格式如 svg 自动按 file 发送）| file"
+			output: {
+				schema: { type: "string" },
+				render: (_args, value) => [{
+					type: "text",
+					text: value
+				}]
 			},
-			caption: {
-				type: "string",
-				description: "Optional caption text"
+			async execute(args, exec) {
+				const sessionId = exec.agent?.id ?? "";
+				const workspaceRoot = workspaceForTaskKey(conversationKeyForSessionId(sessionId));
+				const { abs, ok: inWorkspace } = resolveInWorkspacePath(args.path, workspaceRoot);
+				if (!inWorkspace) return "拒绝: 路径不在工作区内";
+				const route = routeForSessionId(sessionId);
+				if (!route) return "错误: 当前会话未绑定飞书对话，无法发送文件（请在飞书里对我说）";
+				const key = route.sessionKey;
+				const client = getLarkClient();
+				if (!client) return "错误: lark 客户端未就绪";
+				const isImage = args.kind === "image" && /\.(png|jpe?g|webp|gif)$/i.test(args.path);
+				if (isImage ? !client.uploadImage : !client.uploadFile) return "错误: lark 客户端未就绪";
+				let buf;
+				try {
+					if (statSync(abs).size > 26214400) return "错误: 文件超过 25MB 上限";
+					buf = readFileSync(abs);
+				} catch (err) {
+					return `错误: 读取文件失败 (${err instanceof Error ? err.message : String(err)})`;
+				}
+				const fileName = args.path.split(/[\\/]/).pop() ?? "file";
+				let uploadKey;
+				if (isImage) uploadKey = extractUploadKey(await client.uploadImage({ image: buf }), "image_key");
+				else uploadKey = extractUploadKey(await client.uploadFile({
+					file_type: "file",
+					file_name: fileName,
+					file: buf
+				}), "file_key");
+				if (!uploadKey) return "错误: 上传失败";
+				const liveCard = streamHandles.get(key);
+				if (isImage && liveCard && !liveCard.disposed) {
+					await liveCard.image(uploadKey, args.caption || fileName);
+					return `已嵌入当前回复卡片 ${args.path}`;
+				}
+				await sender.sendFile(route.chatId, uploadKey, isImage ? "image" : "file");
+				return `已发送 ${args.path}`;
 			}
-		},
-		output: {
-			schema: { type: "string" },
-			render: (_args, value) => [{
-				type: "text",
-				text: value
-			}]
-		},
-		async execute(args, exec) {
-			const sessionId = exec.agent?.id ?? "";
-			const workspaceRoot = workspaceForTaskKey(conversationKeyForSessionId(sessionId));
-			const { abs, ok: inWorkspace } = resolveInWorkspacePath(args.path, workspaceRoot);
-			if (!inWorkspace) return "拒绝: 路径不在工作区内";
-			const route = routeForSessionId(sessionId);
-			if (!route) return "错误: 当前会话未绑定飞书对话，无法发送文件（请在飞书里对我说）";
-			const key = route.sessionKey;
-			const client = getLarkClient();
-			if (!client) return "错误: lark 客户端未就绪";
-			const isImage = args.kind === "image" && /\.(png|jpe?g|webp|gif)$/i.test(args.path);
-			if (isImage ? !client.uploadImage : !client.uploadFile) return "错误: lark 客户端未就绪";
-			let buf;
-			try {
-				if (statSync(abs).size > 26214400) return "错误: 文件超过 25MB 上限";
-				buf = readFileSync(abs);
-			} catch (err) {
-				return `错误: 读取文件失败 (${err instanceof Error ? err.message : String(err)})`;
-			}
-			const fileName = args.path.split(/[\\/]/).pop() ?? "file";
-			let uploadKey;
-			if (isImage) uploadKey = extractUploadKey(await client.uploadImage({ image: buf }), "image_key");
-			else uploadKey = extractUploadKey(await client.uploadFile({
-				file_type: "file",
-				file_name: fileName,
-				file: buf
-			}), "file_key");
-			if (!uploadKey) return "错误: 上传失败";
-			const liveCard = streamHandles.get(key);
-			if (isImage && liveCard && !liveCard.disposed) {
-				await liveCard.image(uploadKey, args.caption || fileName);
-				return `已嵌入当前回复卡片 ${args.path}`;
-			}
-			await sender.sendFile(route.chatId, uploadKey, isImage ? "image" : "file");
-			return `已发送 ${args.path}`;
-		}
-	}));
-	ctx.tools.register(defineTool({
-		name: "lark_publish_site",
-		description: "Publish a webpage/game/front-end artifact as a TEMPORARY public link the user can open on their phone, and deliver a Feishu site card. Provide ONE of: url (an http server already running, e.g. a dev server), port (its port), or dir (a built static directory — served by the bridge). The bridge owns the tunnel lifecycle: same target reuses the previous link, a dead tunnel is refreshed with a new link, a different target replaces the old one. Links expire after ~2h. Works from ANY session; the site card is only delivered when the session is bound to a Feishu chat — otherwise use the returned link in your reply.",
-		parameters: {
-			url: {
-				type: "string",
-				description: "http(s) URL already reachable from this host"
+		}));
+		agentTools.register(defineTool({
+			name: "lark_publish_site",
+			description: "Publish a webpage/game/front-end artifact as a TEMPORARY public link the user can open on their phone, and deliver a Feishu site card. Provide ONE of: url (an http server already running, e.g. a dev server), port (its port), or dir (a built static directory — served by the bridge). The bridge owns the tunnel lifecycle: same target reuses the previous link, a dead tunnel is refreshed with a new link, a different target replaces the old one. Links expire after ~2h. Available only in a session started or resumed through Feishu. Deliver the site card to that bound chat.",
+			parameters: {
+				url: {
+					type: "string",
+					description: "http(s) URL already reachable from this host"
+				},
+				port: {
+					type: "number",
+					description: "port of an already-running local server"
+				},
+				dir: {
+					type: "string",
+					description: "absolute path of a static directory to serve (index.html)"
+				},
+				title: {
+					type: "string",
+					description: "optional display title"
+				}
 			},
-			port: {
-				type: "number",
-				description: "port of an already-running local server"
+			output: {
+				schema: { type: "string" },
+				render: (_args, value) => [{
+					type: "text",
+					text: value
+				}]
 			},
-			dir: {
-				type: "string",
-				description: "absolute path of a static directory to serve (index.html)"
+			async execute(args, exec) {
+				const sessionId = exec.agent?.id ?? "";
+				const route = routeForSessionId(sessionId);
+				if (!route) return "错误: 当前会话未绑定飞书对话，不能发布飞书网站预览";
+				const convKey = route?.sessionKey ?? (conversationKeyForSessionId(sessionId) || sessionId);
+				let result;
+				try {
+					result = await sitePreviews.publish({
+						convKey,
+						...route?.chatId ? { chatId: route.chatId } : {},
+						url: args.url,
+						port: typeof args.port === "number" ? args.port : void 0,
+						dir: typeof args.dir === "string" ? args.dir : void 0,
+						title: typeof args.title === "string" ? args.title : void 0
+					});
+				} catch (err) {
+					return `错误: ${err instanceof Error ? err.message : String(err)}`;
+				}
+				let delivery = "当前会话未绑定飞书对话（如 DSH Web GUI），未发卡片；";
+				if (route) try {
+					await sender.sendCard(route.chatId, sitePreviewCard({
+						title: result.title,
+						publicUrl: result.publicUrl,
+						debugUrl: result.debugUrl,
+						origin: result.target,
+						label: result.label,
+						action: result.action,
+						expiresAt: result.expiresAt
+					}));
+					delivery = "网站卡片已发给用户；";
+				} catch (err) {
+					logger.warn(`site preview card send failed: ${err instanceof Error ? err.message : String(err)}`);
+					delivery = "卡片发送失败；";
+				}
+				return `已发布（${result.action}）: ${result.publicUrl}（调试 ${result.debugUrl}，约 2 小时有效）。${delivery}把链接也写进回复。`;
+			}
+		}));
+		agentTools.register(defineTool({
+			name: "lark_config_get",
+			description: "Read bridge config (hot-reloadable keys).",
+			parameters: {},
+			output: {
+				schema: { type: "string" },
+				render: (_a, v) => [{
+					type: "text",
+					text: v
+				}]
 			},
-			title: {
-				type: "string",
-				description: "optional display title"
+			async execute(_args, exec) {
+				if (!routeForSessionId(exec.agent?.id ?? "")) return "错误: 当前会话未绑定飞书对话";
+				return JSON.stringify(getCfg(), null, 2);
 			}
-		},
-		output: {
-			schema: { type: "string" },
-			render: (_args, value) => [{
-				type: "text",
-				text: value
-			}]
-		},
-		async execute(args, exec) {
-			const sessionId = exec.agent?.id ?? "";
-			const route = routeForSessionId(sessionId);
-			const convKey = route?.sessionKey ?? (conversationKeyForSessionId(sessionId) || sessionId);
-			let result;
-			try {
-				result = await sitePreviews.publish({
-					convKey,
-					...route?.chatId ? { chatId: route.chatId } : {},
-					url: args.url,
-					port: typeof args.port === "number" ? args.port : void 0,
-					dir: typeof args.dir === "string" ? args.dir : void 0,
-					title: typeof args.title === "string" ? args.title : void 0
-				});
-			} catch (err) {
-				return `错误: ${err instanceof Error ? err.message : String(err)}`;
-			}
-			let delivery = "当前会话未绑定飞书对话（如 DSH Web GUI），未发卡片；";
-			if (route) try {
-				await sender.sendCard(route.chatId, sitePreviewCard({
-					title: result.title,
-					publicUrl: result.publicUrl,
-					debugUrl: result.debugUrl,
-					origin: result.target,
-					label: result.label,
-					action: result.action,
-					expiresAt: result.expiresAt
-				}));
-				delivery = "网站卡片已发给用户；";
-			} catch (err) {
-				logger.warn(`site preview card send failed: ${err instanceof Error ? err.message : String(err)}`);
-				delivery = "卡片发送失败；";
-			}
-			return `已发布（${result.action}）: ${result.publicUrl}（调试 ${result.debugUrl}，约 2 小时有效）。${delivery}把链接也写进回复。`;
-		}
-	}));
-	ctx.tools.register(defineTool({
-		name: "lark_config_get",
-		description: "Read bridge config (hot-reloadable keys).",
-		parameters: {},
-		output: {
-			schema: { type: "string" },
-			render: (_a, v) => [{
-				type: "text",
-				text: v
-			}]
-		},
-		async execute() {
-			return JSON.stringify(getCfg(), null, 2);
-		}
-	}));
+		}));
+		try {
+			agentCtx.get("systemPrompt")?.section({
+				name: "lark-link:bridge-channel",
+				order: 200,
+				text: [
+					"你正在通过飞书/Lark 桥接与用户对话。",
+					"可用工具: lark_send_local_file（发送本地文件到当前飞书会话）、lark_publish_site（把网页/游戏/前端产物发布成临时公网链接并给用户发网站卡片）、lark_config_get（读取桥配置）。",
+					"需要让用户临时查看网页/游戏/前端产物时，调用 lark_publish_site：dev server 跑起来后传 port=<端口>；纯静态产物传 dir=<构建产物目录>。工具会自动管理隧道生命周期（相同目标自动复用旧链接）并把网站卡片发给用户；不要自己拼公网链接，也不要重复发布相同目标。",
+					"回复要简洁；长输出会自动流式呈现给用户。"
+				].join("\n")
+			});
+		} catch {}
+	};
 	const commandsCtx = ctx;
 	const registerCmd = (name, description, handler, inputHint) => {
 		commandsCtx.commands?.register?.({
@@ -10617,20 +10638,6 @@ function apply(ctx, rawConfig) {
 		} catch {}
 		return `已清除凭据（ref=${ref}）并清理状态目录 ${dir}。重新使用请运行 /lark setup。`;
 	};
-	try {
-		ctx.systemPrompt?.section?.({
-			priority: 200,
-			section: () => ({
-				role: "system",
-				content: [
-					"你正在通过飞书/Lark 桥接与用户对话。",
-					"可用工具: lark_send_local_file（发送本地文件到当前飞书会话）、lark_publish_site（把网页/游戏/前端产物发布成临时公网链接并给用户发网站卡片）、lark_config_get（读取桥配置）。",
-					"需要让用户临时查看网页/游戏/前端产物时，调用 lark_publish_site：dev server 跑起来后传 port=<端口>；纯静态产物传 dir=<构建产物目录>。工具会自动管理隧道生命周期（相同目标自动复用旧链接）并把网站卡片发给用户；不要自己拼公网链接，也不要重复发布相同目标。",
-					"回复要简洁；长输出会自动流式呈现给用户。"
-				].join("\n")
-			})
-		});
-	} catch {}
 	ctx.effect(() => {
 		startBridge();
 		const stopMediaSweeper = startMediaSweeper({

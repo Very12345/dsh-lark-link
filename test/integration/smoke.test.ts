@@ -48,7 +48,7 @@ function fakeCtx() {
 	return { ctx, tools, commands, effects };
 }
 
-test("smoke: apply() registers tools/commands and effect disposer runs cleanly", async () => {
+test("smoke: host keeps Lark commands but exposes no Feishu model tools outside bridge agents", async () => {
 	const home = mkdtempSync(join(tmpdir(), "dsh-lark-smoke-"));
 	process.env.DSH_LARK_LINK_HOME = home;
 	const { ctx, tools, commands, effects } = fakeCtx();
@@ -60,8 +60,7 @@ test("smoke: apply() registers tools/commands and effect disposer runs cleanly",
 
 	apply(ctx as never, ctx.config);
 	const toolNames = tools.map((t) => t.name);
-	assert.ok(toolNames.includes("lark_send_local_file"), "file tool registered");
-	assert.ok(toolNames.includes("lark_config_get"), "config tool registered");
+	assert.deepEqual(toolNames, [], "Feishu capabilities must not enter the host/global tool layer");
 	const cmdNames = commands.map((c) => c.name);
 	assert.ok(
 		cmdNames.includes("lark"),
